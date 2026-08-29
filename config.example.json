@@ -1,0 +1,36 @@
+{
+  "accounts": [
+    {
+      "email": "user@example.com",
+      "password": "YOUR_PASSWORD",
+      "proxy": "http://127.0.0.1:31001",
+      "active": true
+    }
+  ],
+  "proxy": {
+    "enabled": true,
+    "url": "http://127.0.0.1:31001",
+    "health_check_url": "https://api.ipify.org?format=json"
+  },
+  "turnstile": {
+    "solver_url": "http://127.0.0.1:5072",
+    "sitekey": "0x4AAAAAABqiRMe3mbyG5xKO",
+    "timeout_seconds": 35
+  },
+  "icon_solver": {
+    "enabled": true,
+    "solver_url": "http://127.0.0.1:5073/solve",
+    "timeout_seconds": 60
+  },
+  "runner": {
+    "max_videos_per_cycle": 50,
+    "delay_between_videos_seconds": 2,
+    "auto_daily_bonus": true,
+    "sleep_on_limit_seconds": 180
+  },
+  "app": {
+    "base_url": "https://luckywatch.pro",
+    "signin_url": "https://luckywatch.pro/signin",
+    "watch_url": "https://luckywatch.pro/watch"
+  }
+}
