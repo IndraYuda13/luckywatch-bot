@@ -262,12 +262,13 @@ class AccountWorker(threading.Thread):
         except Exception:
             pass
 
-    def login(self, max_retries: int = 5, force_refresh: bool = False, attempt_offset: int = 0) -> Dict[str, Any]:
+    def login(self, max_retries: int = 10, force_refresh: bool = False, attempt_offset: int = 0) -> Dict[str, Any]:
         """Perform authentication flow with progressive proxy node rotation."""
         if not force_refresh and self.load_saved_session():
             return {"status": "success", "source": "saved_session", "user": self.get_user_info().get("data")}
 
         turnstile_cfg = self.global_config.get("turnstile", {})
+        max_retries = int(turnstile_cfg.get("max_login_retries_per_batch", max_retries))
         sitekey = turnstile_cfg.get("sitekey", "0x4AAAAAABqiRMe3mbyG5xKO")
         timeout_s = turnstile_cfg.get("timeout_seconds", 40)
 
