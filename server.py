@@ -110,7 +110,8 @@ def parse_bot_logs(max_lines: int = 150) -> Tuple[List[str], Dict[str, List[str]
     account_logs: Dict[str, List[str]] = {}
     account_live_state: Dict[str, Dict[str, Any]] = {}
 
-    scan_lines = lines[-1200:] if len(lines) > 1200 else lines
+    # Scan up to 5,000 lines to ensure sleeping accounts (which don't log while sleeping) preserve their SLEEPING status
+    scan_lines = lines[-5000:] if len(lines) > 5000 else lines
 
     for line in scan_lines:
         m = re.match(r"^(\d{2}:\d{2}:\d{2})\s+\[(\w+)\]\s+(?:\[([\w\.-]+)\]\s+)?(.*)$", line)
