@@ -36,6 +36,7 @@ logger = logging.getLogger("LuckyWatchBot")
 
 CONFIG_FILE = Path("config.json")
 STATE_FILE = Path("state/sessions.json")
+FLEET_STATE_FILE = Path("state/fleet_state.json")
 
 
 class AccountWorker(threading.Thread):
@@ -55,6 +56,53 @@ class AccountWorker(threading.Thread):
         self.user_agent = "Mozilla/5.0"
         self.cookie_string = ""
         self._opener = self._build_opener()
+        self._last_auto_withdraw_time = 0
+        self._last_known_balance = "0.0000000"
+        self._last_known_clovers = 0
+
+    def update_fleet_state(self, status: str, countdown_sleep: int = 0, current_task: Optional[Dict[str, Any]] = None, error_reason: Optional[str] = None, daily_done: Optional[int] = None, hourly_done: Optional[int] = None):
+        """Atomically persist worker live state directly to state/fleet_state.json for O(1) instant dashboard sync."""
+        try:
+            FLEET_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            fleet_data = {}
+            if FLEET_STATE_FILE.exists():
+                try:
+                    fleet_data = json.loads(FLEET_STATE_FILE.read_text())
+                except Exception:
+                    fleet_data = {}
+
+            acc_entry = fleet_data.setdefault(self.email, {})
+            acc_entry["status"] = status
+            acc_entry["countdown_sleep"] = int(countdown_sleep)
+            if countdown_sleep > 0:
+                acc_entry["sleep_until_ts"] = int(time.time() + countdown_sleep)
+            else:
+                acc_entry["sleep_until_ts"] = 0
+
+            if current_task is not None:
+                acc_entry["current_task"] = current_task
+            elif status == "SLEEPING":
+                if acc_entry.get("current_task"):
+                    acc_entry["current_task"]["status"] = "SLEEPING"
+
+            if error_reason is not None:
+                acc_entry["error_reason"] = error_reason
+            elif status == "ACTIVE":
+                acc_entry["error_reason"] = None
+
+            if daily_done is not None:
+                acc_entry["daily_done"] = int(daily_done)
+            if hourly_done is not None:
+                acc_entry["hourly_done"] = int(hourly_done)
+
+            acc_entry["balance"] = getattr(self, "_last_known_balance", "0.0000000")
+            acc_entry["clovers"] = getattr(self, "_last_known_clovers", 0)
+            acc_entry["updated_at"] = time.strftime("%H:%M:%S")
+            acc_entry["timestamp"] = int(time.time())
+
+            FLEET_STATE_FILE.write_text(json.dumps(fleet_data, indent=2) + "\n")
+        except Exception:
+            pass
 
     def _build_opener(self) -> urllib.request.OpenerDirector:
         handlers: List[urllib.request.BaseHandler] = []
@@ -593,6 +641,7 @@ class AccountWorker(threading.Thread):
             except Exception as e:
                 login_batch += 1
                 logger.error(f"Login batch #{login_batch} failed for {self.email}: {e}. Entering {cooldown_secs}s cooldown before next rotating attempt (batch #{login_batch+1}) ...")
+                self.update_fleet_state(status="ERROR", countdown_sleep=cooldown_secs, error_reason=str(e))
                 self.adaptive_sleep(cooldown_secs, reason="login_retry_cooldown")
 
         if self.stop_event.is_set():
@@ -608,6 +657,7 @@ class AccountWorker(threading.Thread):
             pass
 
         logger.info(f"Worker started for {self.email} (Dynamic 24/7 Autopilot) ...")
+        self.update_fleet_state(status="ACTIVE", countdown_sleep=0)
 
         cycle_count = 0
         total_session_earned = 0
@@ -649,19 +699,24 @@ class AccountWorker(threading.Thread):
                     sleep_hr = self.seconds_until_next_hour()
                     mins_rem = round(sleep_hr / 60, 1)
                     logger.info(f"⏰ Hourly limit reached (limitInHour). Dynamic sleep {sleep_hr}s (~{mins_rem}m) until next hour reset ...")
+                    self.update_fleet_state(status="SLEEPING", countdown_sleep=sleep_hr)
                     self.adaptive_sleep(sleep_hr, reason="limitInHour")
                     logger.info(f"🔔 Hourly cooldown elapsed for {self.email}. Resuming stream immediately!")
+                    self.update_fleet_state(status="ACTIVE", countdown_sleep=0)
                     break
                 elif res.get("status") == "limit_day":
                     sleep_day = self.seconds_until_next_day()
                     hrs_rem = round(sleep_day / 3600, 1)
                     logger.info(f"🌙 Daily limit reached (limitInDay). Dynamic sleep {sleep_day}s (~{hrs_rem}h) until UTC day reset ...")
+                    self.update_fleet_state(status="SLEEPING", countdown_sleep=sleep_day)
                     self.adaptive_sleep(sleep_day, reason="limitInDay")
                     logger.info(f"🌅 Daily cooldown elapsed for {self.email}. Resuming stream immediately!")
+                    self.update_fleet_state(status="ACTIVE", countdown_sleep=0)
                     break
                 elif res.get("status") == "empty":
                     # Fast 15s backoff on temporary server queue empty (never blind long sleep)
                     logger.warning(f"Task queue temporarily empty from server. Fast backoff 15s ...")
+                    self.update_fleet_state(status="ACTIVE", countdown_sleep=15)
                     self.adaptive_sleep(15, reason="queue_empty")
                 else:
                     time.sleep(delay)
@@ -697,6 +752,15 @@ class AccountWorker(threading.Thread):
                 pass
 
         logger.info(f"▶ Task [{task_id}] | Video: {yt_id} | Dur: {duration}s | Day Left: {limit_day} | Hour Left: {limit_hour} | CurDay: {cur_day}")
+
+        # Atomically record active streaming state
+        self.update_fleet_state(
+            status="ACTIVE",
+            countdown_sleep=0,
+            current_task={"id": task_id, "video_id": yt_id, "duration": duration, "elapsed": 0, "status": "STREAMING"},
+            daily_done=int(cur_day),
+            hourly_done=max(0, 65 - int(limit_hour)),
+        )
 
         # 2. Trigger task start telemetry
         self.start_task(task_id)

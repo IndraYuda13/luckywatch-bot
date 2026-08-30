@@ -38,6 +38,7 @@ logger = logging.getLogger("DashboardServer")
 
 CONFIG_FILE = Path("/root/projects/luckywatch-bot/config.json")
 STATE_FILE = Path("/root/projects/luckywatch-bot/state/sessions.json")
+FLEET_STATE_FILE = Path("/root/projects/luckywatch-bot/state/fleet_state.json")
 LOG_FILE = Path("/root/projects/luckywatch-bot/bot.log")
 
 # In-memory proxy geo cache and user balance cache
@@ -110,8 +111,8 @@ def parse_bot_logs(max_lines: int = 150) -> Tuple[List[str], Dict[str, List[str]
     account_logs: Dict[str, List[str]] = {}
     account_live_state: Dict[str, Dict[str, Any]] = {}
 
-    # Scan up to 5,000 lines to ensure sleeping accounts (which don't log while sleeping) preserve their SLEEPING status
-    scan_lines = lines[-5000:] if len(lines) > 5000 else lines
+    # Scan 150 lines only for log stream rendering (state is now independently read from fleet_state.json)
+    scan_lines = lines[-200:] if len(lines) > 200 else lines
 
     for line in scan_lines:
         m = re.match(r"^(\d{2}:\d{2}:\d{2})\s+\[(\w+)\]\s+(?:\[([\w\.-]+)\]\s+)?(.*)$", line)
@@ -209,6 +210,14 @@ def get_latest_stats() -> dict:
             sessions_map = st.get("sessions", {})
         except Exception:
             pass
+
+    # Read deterministic fleet live state directly from state/fleet_state.json
+    fleet_states_map = {}
+    if FLEET_STATE_FILE.exists():
+        try:
+            fleet_states_map = json.loads(FLEET_STATE_FILE.read_text())
+        except Exception:
+            fleet_states_map = {}
 
     tail_logs, raw_acc_logs, acc_live_states = parse_bot_logs(120)
 
@@ -386,21 +395,35 @@ def get_latest_stats() -> dict:
         cookie_str = sess.get("cookie_string", "")
         cached_user = sess.get("user", {})
 
-        # Live state from logs
-        live_st = acc_live_states.get(
-            acc_prefix,
-            {
-                "status": "IDLE" if is_active_cfg else "DISABLED",
-                "current_task": None,
-                "daily_done": 0,
-                "daily_cap": 560,
-                "hourly_done": 0,
-                "hourly_cap": 65,
-                "countdown_sleep": 0,
-                "error_reason": None,
-                "last_activity_time": "-",
-            },
-        )
+        # Live state from deterministic state file (1st priority) with fallback to log parser
+        fleet_st = fleet_states_map.get(email, {})
+        log_st = acc_live_states.get(acc_prefix, {})
+
+        live_status = fleet_st.get("status") or log_st.get("status") or ("IDLE" if is_active_cfg else "DISABLED")
+        live_task = fleet_st.get("current_task") or log_st.get("current_task")
+        live_error = fleet_st.get("error_reason") or log_st.get("error_reason")
+        live_daily = fleet_st.get("daily_done", log_st.get("daily_done", 0))
+        live_hourly = fleet_st.get("hourly_done", log_st.get("hourly_done", 0))
+        live_act_time = fleet_st.get("updated_at") or log_st.get("last_activity_time", "-")
+
+        # Calculate exact dynamic sleep countdown from timestamp
+        live_sleep_cd = 0
+        if fleet_st.get("sleep_until_ts", 0) > now_ts:
+            live_sleep_cd = int(fleet_st["sleep_until_ts"] - now_ts)
+        elif log_st.get("countdown_sleep", 0) > 0:
+            live_sleep_cd = int(log_st["countdown_sleep"])
+
+        live_st = {
+            "status": live_status,
+            "current_task": live_task,
+            "daily_done": int(live_daily),
+            "daily_cap": 560,
+            "hourly_done": int(live_hourly),
+            "hourly_cap": 65,
+            "countdown_sleep": live_sleep_cd,
+            "error_reason": live_error,
+            "last_activity_time": live_act_time,
+        }
 
         # User balance resolution & verification status check (cache + fast upstream check)
         balance_val = str(cached_user.get("balance", "0.0000000"))
