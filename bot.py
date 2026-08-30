@@ -380,18 +380,102 @@ class AccountWorker(threading.Thread):
         return {"status": "skipped", "message": "Daily bonus not ready"}
 
     def seconds_until_next_hour(self) -> int:
-        """Calculate exact seconds until the next hour rollover + 20s buffer."""
+        """Calculate exact seconds until the next hour rollover (:00:15) UTC/local."""
         now = datetime.now()
-        next_hour = (now + timedelta(hours=1)).replace(minute=0, second=20, microsecond=0)
+        # Next hour at 00 minutes and 15 seconds
+        next_hour = (now + timedelta(hours=1)).replace(minute=0, second=15, microsecond=0)
         secs = int((next_hour - now).total_seconds())
-        return max(60, secs)
+        # Return exact dynamic remaining seconds
+        return max(5, secs)
 
     def seconds_until_next_day(self) -> int:
-        """Calculate exact seconds until tomorrow 00:01 (UTC reset) + buffer."""
-        now = datetime.now()
-        next_day = (now + timedelta(days=1)).replace(hour=0, minute=1, second=30, microsecond=0)
-        secs = int((next_day - now).total_seconds())
-        return max(300, secs)
+        """Calculate exact seconds until tomorrow reset 00:00:30 UTC."""
+        now_utc = datetime.now(timezone.utc)
+        next_day_utc = (now_utc + timedelta(days=1)).replace(hour=0, minute=0, second=30, microsecond=0)
+        secs = int((next_day_utc - now_utc).total_seconds())
+        return max(30, secs)
+
+    def adaptive_sleep(self, total_seconds: int, reason: str = "limit"):
+        """Sleep with 1-second step checks to allow fast shutdown and accurate countdown."""
+        start_time = time.time()
+        while not self.stop_event.is_set():
+            elapsed = time.time() - start_time
+            remaining = int(total_seconds - elapsed)
+            if remaining <= 0:
+                break
+            time.sleep(1)
+
+    def run(self):
+        """Worker thread main execution loop (Fully Dynamic 24/7 Stream Engine)."""
+        self.check_proxy()
+        try:
+            self.login(max_retries=5)
+        except Exception as e:
+            logger.error(f"Login failed for {self.email}: {e}")
+            return
+
+        runner_cfg = self.global_config.get("runner", {})
+        delay = runner_cfg.get("delay_between_videos_seconds", 2)
+        auto_bonus = runner_cfg.get("auto_daily_bonus", True)
+
+        try:
+            self.check_ip_verification()
+        except Exception:
+            pass
+
+        logger.info(f"Worker started for {self.email} (Dynamic 24/7 Autopilot) ...")
+
+        cycle_count = 0
+        total_session_earned = 0
+
+        while not self.stop_event.is_set():
+            if auto_bonus:
+                try:
+                    self.claim_daily_bonus()
+                except Exception as e:
+                    logger.warning(f"Daily bonus check notice: {e}")
+
+            # Always fetch real user balance from server
+            try:
+                u_curr = self.get_user_info().get("data", {})
+                logger.info(f"💰 REAL BALANCE: ${u_curr.get('balance')} USD | Clovers: {u_curr.get('clover')}")
+            except Exception:
+                pass
+
+            # Dynamic Infinite Stream Loop (No arbitrary 50 video limit)
+            while not self.stop_event.is_set():
+                cycle_count += 1
+                logger.info(f"\n--- [Cycle #{cycle_count} | Session Earned: {total_session_earned}] ---")
+                res = self.watch_single_video()
+
+                if res.get("status") == "success":
+                    total_session_earned += 1
+                    try:
+                        u = self.get_user_info().get("data", {})
+                        logger.info(f"💰 REAL BALANCE: ${u.get('balance')} USD | Clovers: {u.get('clover')}")
+                    except Exception:
+                        pass
+                    time.sleep(delay)
+                elif res.get("status") == "limit_hour":
+                    sleep_hr = self.seconds_until_next_hour()
+                    mins_rem = round(sleep_hr / 60, 1)
+                    logger.info(f"⏰ Hourly limit reached (limitInHour). Dynamic sleep {sleep_hr}s (~{mins_rem}m) until next hour reset ...")
+                    self.adaptive_sleep(sleep_hr, reason="limitInHour")
+                    logger.info(f"🔔 Hourly cooldown elapsed for {self.email}. Resuming stream immediately!")
+                    break
+                elif res.get("status") == "limit_day":
+                    sleep_day = self.seconds_until_next_day()
+                    hrs_rem = round(sleep_day / 3600, 1)
+                    logger.info(f"🌙 Daily limit reached (limitInDay). Dynamic sleep {sleep_day}s (~{hrs_rem}h) until UTC day reset ...")
+                    self.adaptive_sleep(sleep_day, reason="limitInDay")
+                    logger.info(f"🌅 Daily cooldown elapsed for {self.email}. Resuming stream immediately!")
+                    break
+                elif res.get("status") == "empty":
+                    # Fast 15s backoff on temporary server queue empty (never blind long sleep)
+                    logger.warning(f"Task queue temporarily empty from server. Fast backoff 15s ...")
+                    self.adaptive_sleep(15, reason="queue_empty")
+                else:
+                    time.sleep(delay)
 
     def watch_single_video(self) -> Dict[str, Any]:
         """Execute one complete video watch and real reward claim cycle."""
