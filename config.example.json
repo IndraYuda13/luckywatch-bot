@@ -23,10 +23,8 @@
     "timeout_seconds": 60
   },
   "runner": {
-    "max_videos_per_cycle": 50,
     "delay_between_videos_seconds": 2,
-    "auto_daily_bonus": true,
-    "sleep_on_limit_seconds": 180
+    "auto_daily_bonus": true
   },
   "app": {
     "base_url": "https://luckywatch.pro",
