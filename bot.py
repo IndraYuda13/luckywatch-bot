@@ -520,17 +520,21 @@ class AccountWorker(threading.Thread):
         """Worker thread main execution loop (Fully Dynamic 24/7 Stream Engine with Continuous Login Retry)."""
         self.check_proxy()
 
-        # Continuous login loop with 5 attempts per batch, then 5m cooldown & rotating proxy nodes
+        turnstile_cfg = self.global_config.get("turnstile", {})
+        retries_per_batch = int(turnstile_cfg.get("max_login_retries_per_batch", 10))
+        cooldown_secs = int(turnstile_cfg.get("cooldown_on_failure_seconds", 300))
+
+        # Continuous login loop with configurable attempts per batch, then cooldown & rotating proxy nodes
         login_batch = 0
         while not self.stop_event.is_set():
             try:
-                attempt_offset = login_batch * 5
-                self.login(max_retries=5, attempt_offset=attempt_offset)
+                attempt_offset = login_batch * retries_per_batch
+                self.login(max_retries=retries_per_batch, attempt_offset=attempt_offset)
                 break
             except Exception as e:
                 login_batch += 1
-                logger.error(f"Login batch #{login_batch} failed for {self.email}: {e}. Entering 5-minute cooldown before next rotating attempt (batch #{login_batch+1}) ...")
-                self.adaptive_sleep(300, reason="login_retry_cooldown")
+                logger.error(f"Login batch #{login_batch} failed for {self.email}: {e}. Entering {cooldown_secs}s cooldown before next rotating attempt (batch #{login_batch+1}) ...")
+                self.adaptive_sleep(cooldown_secs, reason="login_retry_cooldown")
 
         if self.stop_event.is_set():
             return

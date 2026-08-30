@@ -16,7 +16,9 @@
   "turnstile": {
     "solver_url": "http://127.0.0.1:5072",
     "sitekey": "0x4AAAAAABqiRMe3mbyG5xKO",
-    "timeout_seconds": 35
+    "timeout_seconds": 35,
+    "max_login_retries_per_batch": 10,
+    "cooldown_on_failure_seconds": 300
   },
   "icon_solver": {
     "enabled": true,
