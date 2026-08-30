@@ -1689,6 +1689,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <span style="font-size:11px; color:var(--text-tertiary);">Must be a valid TRON address linked to your FaucetPay account.</span>
       </div>
 
+      <div style="display:flex; flex-direction:column; gap:6px;">
+        <label style="font-size:12px; color:var(--text-secondary);">Email Confirmation Code (from Gmail inbox):</label>
+        <div style="display:flex; gap:8px;">
+          <input type="text" id="modal-wallet-code" placeholder="Enter 6-digit code..." style="flex:1; padding:10px 14px; background:rgba(0,0,0,0.6); border:1px solid var(--border-medium); border-radius:8px; color:#fff; font-family:'JetBrains Mono', monospace; font-size:13px; outline:none;" />
+          <button class="btn-action" style="padding:8px 12px; font-size:12px; white-space:nowrap;" onclick="requestWalletCode()">📩 Send Code</button>
+        </div>
+        <span style="font-size:11px; color:var(--text-tertiary);">Click 'Send Code' to receive confirmation code on your Gmail, then enter it above.</span>
+      </div>
+
       <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:8px;">
         <button class="btn-action" onclick="closeWalletModal()" style="padding:8px 16px;">Cancel</button>
         <button class="btn-action" style="background:var(--emerald-bright); color:#000; font-weight:800; padding:8px 18px; border:none;" onclick="saveWalletFromModal()">Save & Sync Wallet</button>
@@ -2268,6 +2277,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       currentModalEmail = email;
       document.getElementById('modal-wallet-email').textContent = email;
       document.getElementById('modal-wallet-address').value = currentWallet || '';
+      document.getElementById('modal-wallet-code').value = '';
       const modal = document.getElementById('wallet-modal');
       modal.style.display = 'flex';
       document.getElementById('modal-wallet-address').focus();
@@ -2278,8 +2288,29 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       currentModalEmail = '';
     }
 
+    async function requestWalletCode() {
+      const wallet = document.getElementById('modal-wallet-address').value.trim();
+      if (!wallet) {
+        showToast('Please enter wallet address first');
+        return;
+      }
+      showToast(`Requesting confirmation code for ${currentModalEmail}...`);
+      try {
+        const res = await fetch('/api/actions/save_wallet', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: currentModalEmail, wallet: wallet, code: '' })
+        });
+        const result = await res.json();
+        showToast('Code sent to Gmail inbox! Please enter code.');
+      } catch (err) {
+        showToast(`Request code error: ${err.message}`);
+      }
+    }
+
     async function saveWalletFromModal() {
       const wallet = document.getElementById('modal-wallet-address').value.trim();
+      const code = document.getElementById('modal-wallet-code').value.trim();
       if (!wallet) {
         showToast('Please enter a valid wallet address');
         return;
@@ -2291,12 +2322,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const res = await fetch('/api/actions/save_wallet', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: currentModalEmail, wallet: wallet })
+          body: JSON.stringify({ email: currentModalEmail, wallet: wallet, code: code })
         });
         const result = await res.json();
         showToast(result.message || 'Wallet saved successfully');
-        closeWalletModal();
-        fetchStats();
+        if (result.status === 'ok') {
+          closeWalletModal();
+          fetchStats();
+        }
       } catch (err) {
         showToast(`Save wallet failed: ${err.message}`);
       }
@@ -2431,6 +2464,7 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(length).decode("utf-8"))
                 target_email = body.get("email")
                 wallet_addr = body.get("wallet", "").strip()
+                confirm_code = body.get("code", "").strip()
 
                 if not target_email or not wallet_addr:
                     self._send_json(400, {"status": "error", "message": "Email and wallet are required."})
@@ -2449,6 +2483,7 @@ class Handler(BaseHTTPRequestHandler):
                         CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
 
                 # Update remote settings on LuckyWatch if session active
+                remote_msg = "Saved locally in config."
                 if STATE_FILE.exists():
                     try:
                         st = json.loads(STATE_FILE.read_text())
@@ -2459,16 +2494,23 @@ class Handler(BaseHTTPRequestHandler):
                             opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
                             req_save = urllib.request.Request(
                                 "https://luckywatch.pro/api/user/settings/save/",
-                                data=urllib.parse.urlencode({"method": "payments", "faucetpayusdt_wallet": wallet_addr, "code": ""}).encode("utf-8"),
+                                data=urllib.parse.urlencode({"method": "payments", "faucetpayusdt_wallet": wallet_addr, "code": confirm_code}).encode("utf-8"),
                                 headers={"Cookie": cookie_str, "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0"},
                             )
-                            opener.open(req_save, timeout=5)
-                    except Exception:
-                        pass
+                            s_res = json.loads(opener.open(req_save, timeout=6).read().decode("utf-8"))
+                            if s_res.get("status") == "ok":
+                                if "time" in s_res.get("data", {}):
+                                    remote_msg = "Confirmation code sent to Gmail! Please input code to complete sync."
+                                else:
+                                    remote_msg = "Successfully synced to LuckyWatch server!"
+                            else:
+                                remote_msg = f"Server response: {s_res.get('message')}"
+                    except Exception as e:
+                        remote_msg = f"Remote sync notice: {e}"
 
                 # Clear cache
                 _LAST_USER_FETCH.clear()
-                self._send_json(200, {"status": "ok", "message": f"Wallet {wallet_addr[:6]}... saved for {target_email}!"})
+                self._send_json(200, {"status": "ok", "message": remote_msg})
             except Exception as e:
                 self._send_json(500, {"status": "error", "message": f"Failed to save wallet: {e}"})
 
