@@ -294,6 +294,7 @@ def get_latest_stats() -> dict:
             "email": email,
             "email_redacted": redacted,
             "proxy": proxy_url,
+            "faucetpay_usdt_trc20": acc.get("faucetpay_usdt_trc20", ""),
             "country": geo.get("country", "UN"),
             "country_name": geo.get("country_name", "Unknown"),
             "city": geo.get("city", "Unknown"),
@@ -1505,6 +1506,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <span style="font-size: 11px; color: var(--text-tertiary); text-transform: uppercase; font-weight: 700;">Accounts at Goal</span>
           <div class="mono tabular" id="accounts-ready-count" style="font-size: 20px; font-weight: 800; color: #FFFFFF;">0 / 2 Accounts</div>
         </div>
+
+        <div style="display: flex; align-items: center; padding-left: 10px; border-left: 1px solid var(--border-subtle);">
+          <button class="btn-action" id="btn-withdraw-all" style="background: var(--gold-gradient); color: #000; font-weight: 800; font-size: 12px; padding: 8px 14px; border: none; box-shadow: 0 0 15px var(--gold-glow);" onclick="triggerWithdrawAll()">
+            ⚡ Auto Withdraw All Ready
+          </button>
+        </div>
       </div>
     </section>
 
@@ -1598,6 +1605,34 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
   </div>
 
+  <!-- WALLET CONFIG MODAL -->
+  <div id="wallet-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.75); backdrop-filter:blur(10px); z-index:999; align-items:center; justify-content:center;">
+    <div class="glass-panel" style="width:100%; max-width:480px; padding:24px; display:flex; flex-direction:column; gap:16px; border:1px solid var(--border-focus); box-shadow:0 20px 50px rgba(0,0,0,0.8);">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h3 style="font-size:16px; font-weight:800; color:#fff; display:flex; align-items:center; gap:8px;">
+          <span>⚙️</span> FaucetPay USDT TRC20 Setup
+        </h3>
+        <button onclick="closeWalletModal()" style="background:none; border:none; color:var(--text-tertiary); font-size:20px; cursor:pointer;">&times;</button>
+      </div>
+
+      <div style="display:flex; flex-direction:column; gap:6px;">
+        <span style="font-size:12px; color:var(--text-secondary);">Target Account:</span>
+        <div class="mono" id="modal-wallet-email" style="font-size:13px; font-weight:700; color:var(--cyan); padding:8px 12px; background:rgba(0,0,0,0.4); border-radius:8px; border:1px solid var(--border-subtle);">user@example.com</div>
+      </div>
+
+      <div style="display:flex; flex-direction:column; gap:6px;">
+        <label style="font-size:12px; color:var(--text-secondary);">FaucetPay USDT (TRC20) Wallet Address:</label>
+        <input type="text" id="modal-wallet-address" placeholder="T... (e.g. TVneJHRmjMnfydndu44GH6djeJFuF8sf4b)" style="width:100%; padding:10px 14px; background:rgba(0,0,0,0.6); border:1px solid var(--border-medium); border-radius:8px; color:#fff; font-family:'JetBrains Mono', monospace; font-size:13px; outline:none;" />
+        <span style="font-size:11px; color:var(--text-tertiary);">Must be a valid TRON address linked to your FaucetPay account.</span>
+      </div>
+
+      <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:8px;">
+        <button class="btn-action" onclick="closeWalletModal()" style="padding:8px 16px;">Cancel</button>
+        <button class="btn-action" style="background:var(--emerald-bright); color:#000; font-weight:800; padding:8px 18px; border:none;" onclick="saveWalletFromModal()">Save & Sync Wallet</button>
+      </div>
+    </div>
+  </div>
+
   <!-- TOAST CONTAINER -->
   <div class="toast-container" id="toast-container"></div>
 
@@ -1611,6 +1646,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     let logChannel = 'all';
     let logLevelFilter = 'ALL';
     let autoScrollEnabled = true;
+    let currentModalEmail = '';
 
     /* INITIALIZATION FUNCTION */
     function initDashboard() {
@@ -1635,11 +1671,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       setInterval(fetchStats, 2000);
     }
 
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', initDashboard);
-    } else {
-      initDashboard();
-    }
+    /* AUTO RUN */
+    initDashboard();
+    window.addEventListener('load', initDashboard);
 
     /* THRESHOLD LOGIC */
     function setThreshold(val) {
@@ -1920,8 +1954,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             </div>
 
             <div class="card-footer-actions">
-              <span class="mono">${acc.city || 'Egress Node'} (${acc.isp?.slice(0, 16) || 'Proxy'})</span>
+              <div style="display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0;">
+                <span class="mono" style="font-size: 10px; color: ${acc.faucetpay_usdt_trc20 ? 'var(--emerald-bright)' : 'var(--text-tertiary)'}; cursor: pointer; text-decoration: underline dotted;" onclick="openWalletModal('${acc.email}', '${acc.faucetpay_usdt_trc20 || ''}')" title="${acc.faucetpay_usdt_trc20 || 'Click to set FaucetPay USDT TRC20'}">
+                  ${acc.faucetpay_usdt_trc20 ? 'TRC20: ' + acc.faucetpay_usdt_trc20.slice(0, 5) + '...' + acc.faucetpay_usdt_trc20.slice(-4) : '⚠️ Set FaucetPay Wallet'}
+                </span>
+              </div>
               <div style="display: flex; gap: 6px;">
+                <button class="btn-action" style="padding: 3px 8px; font-size: 10.5px;" onclick="openWalletModal('${acc.email}', '${acc.faucetpay_usdt_trc20 || ''}')" title="Configure Wallet">⚙️</button>
+                <button class="btn-action ${isReady && acc.faucetpay_usdt_trc20 ? 'gold-tier' : ''}" style="padding: 3px 8px; font-size: 10.5px; ${isReady && acc.faucetpay_usdt_trc20 ? 'background: var(--gold-gradient); color: #000; font-weight: 700;' : ''}" onclick="triggerWithdraw('${acc.email}')" ${!acc.faucetpay_usdt_trc20 || !isReady ? 'disabled title=\"Wallet not set or balance below threshold\"' : 'title=\"Withdraw to FaucetPay USDT TRC20\"'}>💸 Payout</button>
                 <button class="btn-action" style="padding: 3px 8px; font-size: 10.5px;" onclick="focusAccountLogs('${acc.email_redacted}')">Logs</button>
               </div>
             </div>
@@ -1971,7 +2011,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <td><span class="mono tabular" style="color: var(--emerald-bright); font-weight: 700;">$${acc.balance}</span></td>
             <td><span class="mono tabular" style="color: var(--amber-bright); font-weight: 700;">${Number(acc.clovers).toLocaleString()}</span></td>
             <td>
-              <div style="display: flex; align-items: center; gap: 8px; width: 110px;">
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <span class="mono" style="font-size: 11px; color: ${acc.faucetpay_usdt_trc20 ? 'var(--emerald-bright)' : 'var(--text-tertiary)'}; cursor: pointer; text-decoration: underline dotted;" onclick="openWalletModal('${acc.email}', '${acc.faucetpay_usdt_trc20 || ''}')">
+                  ${acc.faucetpay_usdt_trc20 ? acc.faucetpay_usdt_trc20.slice(0, 4) + '...' + acc.faucetpay_usdt_trc20.slice(-4) : '⚠️ Set Wallet'}
+                </span>
+              </div>
+            </td>
+            <td>
+              <div style="display: flex; align-items: center; gap: 8px; width: 100px;">
                 <div class="mini-progress" style="flex: 1;">
                   <div class="mini-progress-fill" style="width: ${withdrawPct}%; ${isReady ? 'background: var(--gold-gradient);' : ''}"></div>
                 </div>
@@ -1982,7 +2029,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <td><span class="mono tabular">${acc.hourly_done} / ${acc.hourly_cap}</span></td>
             <td><span class="mono" style="font-size: 11px; color: var(--cyan);">${taskInfo}</span></td>
             <td>
-              <button class="btn-action" style="padding: 3px 8px; font-size: 11px;" onclick="focusAccountLogs('${acc.email_redacted}')">View Stream</button>
+              <div style="display: flex; gap: 4px;">
+                <button class="btn-action" style="padding: 2px 6px; font-size: 10px;" onclick="openWalletModal('${acc.email}', '${acc.faucetpay_usdt_trc20 || ''}')" title="Config Wallet">⚙️</button>
+                <button class="btn-action ${isReady && acc.faucetpay_usdt_trc20 ? 'gold-tier' : ''}" style="padding: 2px 6px; font-size: 10px; ${isReady && acc.faucetpay_usdt_trc20 ? 'background: var(--gold-gradient); color: #000; font-weight: 700;' : ''}" onclick="triggerWithdraw('${acc.email}')" ${!acc.faucetpay_usdt_trc20 || !isReady ? 'disabled' : ''} title="Withdraw Payout">💸</button>
+                <button class="btn-action" style="padding: 2px 6px; font-size: 10px;" onclick="focusAccountLogs('${acc.email_redacted}')">Stream</button>
+              </div>
             </td>
           </tr>
         `;
@@ -2119,6 +2170,92 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       });
     }
 
+    /* WALLET MODAL & ACTIONS */
+    function openWalletModal(email, currentWallet) {
+      currentModalEmail = email;
+      document.getElementById('modal-wallet-email').textContent = email;
+      document.getElementById('modal-wallet-address').value = currentWallet || '';
+      const modal = document.getElementById('wallet-modal');
+      modal.style.display = 'flex';
+      document.getElementById('modal-wallet-address').focus();
+    }
+
+    function closeWalletModal() {
+      document.getElementById('wallet-modal').style.display = 'none';
+      currentModalEmail = '';
+    }
+
+    async function saveWalletFromModal() {
+      const wallet = document.getElementById('modal-wallet-address').value.trim();
+      if (!wallet) {
+        showToast('Please enter a valid wallet address');
+        return;
+      }
+      if (!wallet.startsWith('T') || wallet.length < 30) {
+        showToast('Warning: TRON USDT TRC20 address should start with T...');
+      }
+      try {
+        const res = await fetch('/api/actions/save_wallet', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: currentModalEmail, wallet: wallet })
+        });
+        const result = await res.json();
+        showToast(result.message || 'Wallet saved successfully');
+        closeWalletModal();
+        fetchStats();
+      } catch (err) {
+        showToast(`Save wallet failed: ${err.message}`);
+      }
+    }
+
+    async function triggerWithdraw(email) {
+      const acc = (globalState?.accounts || []).find(a => a.email === email);
+      if (!acc) return;
+      if (!acc.faucetpay_usdt_trc20) {
+        openWalletModal(email, '');
+        showToast('Please configure FaucetPay USDT TRC20 address first');
+        return;
+      }
+      const confirmMsg = `Confirm withdrawal of $${acc.balance} USD for ${acc.email_redacted} to FaucetPay address ${acc.faucetpay_usdt_trc20.slice(0,6)}...${acc.faucetpay_usdt_trc20.slice(-4)}?`;
+      if (!confirm(confirmMsg)) return;
+
+      try {
+        const res = await fetch('/api/actions/withdraw', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: email })
+        });
+        const result = await res.json();
+        showToast(result.message || 'Withdrawal triggered');
+        fetchStats();
+      } catch (err) {
+        showToast(`Withdrawal error: ${err.message}`);
+      }
+    }
+
+    async function triggerWithdrawAll() {
+      const readyAccounts = (globalState?.accounts || []).filter(a => parseFloat(a.balance) >= selectedThreshold && a.faucetpay_usdt_trc20);
+      if (readyAccounts.length === 0) {
+        showToast('No accounts currently meet the threshold with configured wallet');
+        return;
+      }
+      if (!confirm(`Trigger auto-withdrawal for ${readyAccounts.length} ready account(s)?`)) return;
+
+      try {
+        const res = await fetch('/api/actions/withdraw_all', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ threshold: selectedThreshold })
+        });
+        const result = await res.json();
+        showToast(result.message || 'Batch withdrawal completed');
+        fetchStats();
+      } catch (err) {
+        showToast(`Batch withdrawal error: ${err.message}`);
+      }
+    }
+
     function showToast(msg) {
       const container = document.getElementById('toast-container');
       const toast = document.createElement('div');
@@ -2182,6 +2319,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "Not Found", "path": path})
 
     def do_POST(self):
+        global _LAST_USER_FETCH, _GEO_CACHE
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
 
@@ -2193,9 +2331,169 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send_json(500, {"status": "error", "message": f"Failed to trigger retry: {e}"})
 
+        elif path == "/api/actions/save_wallet":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+                target_email = body.get("email")
+                wallet_addr = body.get("wallet", "").strip()
+
+                if not target_email or not wallet_addr:
+                    self._send_json(400, {"status": "error", "message": "Email and wallet are required."})
+                    return
+
+                # Update config.json
+                if CONFIG_FILE.exists():
+                    cfg = json.loads(CONFIG_FILE.read_text())
+                    found = False
+                    for acc in cfg.get("accounts", []):
+                        if acc.get("email") == target_email:
+                            acc["faucetpay_usdt_trc20"] = wallet_addr
+                            found = True
+                            break
+                    if found:
+                        CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
+
+                # Update remote settings on LuckyWatch if session active
+                if STATE_FILE.exists():
+                    try:
+                        st = json.loads(STATE_FILE.read_text())
+                        sess = st.get("sessions", {}).get(target_email, {})
+                        cookie_str = sess.get("cookie_string", "")
+                        if cookie_str:
+                            proxy_url = next((a.get("proxy") for a in cfg.get("accounts", []) if a.get("email") == target_email), "http://127.0.0.1:31001")
+                            opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
+                            req_save = urllib.request.Request(
+                                "https://luckywatch.pro/api/user/settings/save/",
+                                data=urllib.parse.urlencode({"method": "payments", "faucetpayusdt_wallet": wallet_addr, "code": ""}).encode("utf-8"),
+                                headers={"Cookie": cookie_str, "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0"},
+                            )
+                            opener.open(req_save, timeout=5)
+                    except Exception:
+                        pass
+
+                # Clear cache
+                _LAST_USER_FETCH.clear()
+                self._send_json(200, {"status": "ok", "message": f"Wallet {wallet_addr[:6]}... saved for {target_email}!"})
+            except Exception as e:
+                self._send_json(500, {"status": "error", "message": f"Failed to save wallet: {e}"})
+
+        elif path == "/api/actions/withdraw":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+                target_email = body.get("email")
+
+                if not CONFIG_FILE.exists() or not STATE_FILE.exists():
+                    self._send_json(500, {"status": "error", "message": "Config or session state missing."})
+                    return
+
+                cfg = json.loads(CONFIG_FILE.read_text())
+                st = json.loads(STATE_FILE.read_text())
+
+                acc = next((a for a in cfg.get("accounts", []) if a.get("email") == target_email), None)
+                if not acc:
+                    self._send_json(404, {"status": "error", "message": f"Account {target_email} not found."})
+                    return
+
+                wallet = acc.get("faucetpay_usdt_trc20", "").strip()
+                if not wallet:
+                    self._send_json(400, {"status": "error", "message": "FaucetPay USDT TRC20 wallet is not set."})
+                    return
+
+                sess = st.get("sessions", {}).get(target_email, {})
+                cookie_str = sess.get("cookie_string", "")
+                if not cookie_str:
+                    self._send_json(400, {"status": "error", "message": "No active session cookie."})
+                    return
+
+                proxy_url = acc.get("proxy", "http://127.0.0.1:31001")
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
+
+                # Fetch balance
+                req_u = urllib.request.Request(
+                    "https://luckywatch.pro/api/user/",
+                    data=urllib.parse.urlencode({"method": "getCurrentUser"}).encode("utf-8"),
+                    headers={"Cookie": cookie_str, "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0"},
+                )
+                u_res = json.loads(opener.open(req_u, timeout=5).read().decode("utf-8"))
+                bal = float(u_res.get("data", {}).get("balance", 0.0))
+
+                if bal < 0.10:
+                    self._send_json(400, {"status": "error", "message": f"Balance (${bal:.4f}) is below minimum $0.10 USD."})
+                    return
+
+                # Execute payout send API
+                req_p = urllib.request.Request(
+                    "https://luckywatch.pro/api/user/payout/send/",
+                    data=urllib.parse.urlencode({"sum": f"{bal:.7f}", "service": "faucetpayusdt", "captcha": ""}).encode("utf-8"),
+                    headers={"Cookie": cookie_str, "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0"},
+                )
+                p_res = json.loads(opener.open(req_p, timeout=8).read().decode("utf-8"))
+                _LAST_USER_FETCH.clear()
+
+                if p_res.get("status") == "ok":
+                    self._send_json(200, {"status": "ok", "message": f"🎉 Withdrawal of ${bal:.4f} USD sent to {wallet[:6]}...{wallet[-4:]}!"})
+                else:
+                    self._send_json(200, {"status": "notice", "message": f"Payout response: {p_res.get('message', 'Processed')}."})
+            except Exception as e:
+                self._send_json(500, {"status": "error", "message": f"Withdrawal request error: {e}"})
+
+        elif path == "/api/actions/withdraw_all":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length).decode("utf-8")) if length > 0 else {}
+                thresh = float(body.get("threshold", 0.10))
+
+                cfg = json.loads(CONFIG_FILE.read_text()) if CONFIG_FILE.exists() else {}
+                st = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
+
+                successes = []
+                failures = []
+
+                for acc in cfg.get("accounts", []):
+                    email = acc.get("email")
+                    wallet = acc.get("faucetpay_usdt_trc20", "").strip()
+                    if not wallet:
+                        continue
+
+                    sess = st.get("sessions", {}).get(email, {})
+                    cookie_str = sess.get("cookie_string", "")
+                    if not cookie_str:
+                        continue
+
+                    proxy_url = acc.get("proxy", "http://127.0.0.1:31001")
+                    try:
+                        opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
+                        req_u = urllib.request.Request(
+                            "https://luckywatch.pro/api/user/",
+                            data=urllib.parse.urlencode({"method": "getCurrentUser"}).encode("utf-8"),
+                            headers={"Cookie": cookie_str, "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0"},
+                        )
+                        u_res = json.loads(opener.open(req_u, timeout=4).read().decode("utf-8"))
+                        bal = float(u_res.get("data", {}).get("balance", 0.0))
+
+                        if bal >= thresh and bal >= 0.10:
+                            req_p = urllib.request.Request(
+                                "https://luckywatch.pro/api/user/payout/send/",
+                                data=urllib.parse.urlencode({"sum": f"{bal:.7f}", "service": "faucetpayusdt", "captcha": ""}).encode("utf-8"),
+                                headers={"Cookie": cookie_str, "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0"},
+                            )
+                            p_res = json.loads(opener.open(req_p, timeout=8).read().decode("utf-8"))
+                            successes.append(f"{email.split('@')[0]} (${bal:.4f})")
+                    except Exception as e:
+                        failures.append(f"{email.split('@')[0]}: {e}")
+
+                _LAST_USER_FETCH.clear()
+                msg = f"Auto-Withdraw executed. Success: {len(successes)} accounts ({', '.join(successes) if successes else 'None'})."
+                if failures:
+                    msg += f" Notice: {len(failures)} failed."
+                self._send_json(200, {"status": "ok", "message": msg})
+            except Exception as e:
+                self._send_json(500, {"status": "error", "message": f"Batch withdraw failed: {e}"})
+
         elif path == "/api/actions/refresh":
             # Clear in-memory caches to force instant fresh fetch on next poll
-            global _LAST_USER_FETCH, _GEO_CACHE
             _LAST_USER_FETCH.clear()
             _GEO_CACHE.clear()
             self._send_json(200, {"status": "ok", "message": "Session and telemetry caches cleared."})

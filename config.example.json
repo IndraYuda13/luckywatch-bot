@@ -4,7 +4,8 @@
       "email": "user@example.com",
       "password": "YOUR_PASSWORD",
       "proxy": "http://127.0.0.1:31001",
-      "active": true
+      "active": true,
+      "faucetpay_usdt_trc20": ""
     }
   ],
   "proxy": {
