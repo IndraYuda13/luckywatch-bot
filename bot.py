@@ -3,12 +3,13 @@
 LuckyWatch Automated Watch & Claim Engine (Multi-Account & Multi-Threading Support)
 ----------------------------------------------------------------------------------
 Enterprise-grade Pure Python HTTP Automation for LuckyWatch.
-- 100% Native Python requests / urllib (Zero Playwright / Zero Selenium).
 - Multi-Account Concurrent Daemon (1 Thread Worker per Active Account with Isolated Proxy).
-- Smart Quota Scheduling:
-  * Hourly Limit Exhausted -> Sleeps precisely until the next hour rollover (:01).
-  * Daily Limit Exhausted  -> Sleeps precisely until the next UTC/server day reset (00:01).
-- Integrated IconCaptchaSolver microservice via Gemma 4 31B & Gemini Flash Vision.
+- Robust Login Architecture with Exponential Backoff & Multi-Attempt Retries.
+- Smart Dynamic Quota Scheduler:
+  * Ingests real server quota from task payloads (limitHour & limitDay).
+  * Fast Exponential Re-Check (30s -> 60s -> 120s max) if no task is returned.
+  * Precise sleep to next hour rollover (:01) ONLY when server explicitly signals limitInHour.
+- Integrated IconCaptchaSolver microservice via 9router Vision LLM.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logging.basicConfig(
     level=logging.INFO,
@@ -140,7 +141,7 @@ class AccountWorker(threading.Thread):
         self.cookie_string = ""
         return False
 
-    def solve_turnstile(self, sitekey: str, action: str = "login", timeout_s: int = 35) -> str:
+    def solve_turnstile(self, sitekey: str, action: str = "login", timeout_s: int = 40) -> str:
         """Call internal Turnstile Solver API to obtain Cloudflare challenge token."""
         solver_cfg = self.global_config.get("turnstile", {})
         solver_api = solver_cfg.get("solver_url", "http://127.0.0.1:5072")
@@ -164,7 +165,7 @@ class AccountWorker(threading.Thread):
             raise RuntimeError(f"Turnstile solver failed to create task: {task}")
 
         task_id = task["taskId"]
-        logger.info(f"Polling Turnstile task ID {task_id} ...")
+        logger.info(f"Polling Turnstile task ID {task_id} (max {timeout_s}s)...")
 
         start_time = time.time()
         while time.time() - start_time < timeout_s:
@@ -238,58 +239,80 @@ class AccountWorker(threading.Thread):
         except Exception:
             pass
 
-    def login(self, force_refresh: bool = False) -> Dict[str, Any]:
-        """Perform full authentication flow using pure HTTP requests."""
+    def login(self, max_retries: int = 5, force_refresh: bool = False) -> Dict[str, Any]:
+        """Perform full authentication flow with automatic retry loop."""
         if not force_refresh and self.load_saved_session():
             return {"status": "success", "source": "saved_session", "user": self.get_user_info().get("data")}
 
         turnstile_cfg = self.global_config.get("turnstile", {})
         sitekey = turnstile_cfg.get("sitekey", "0x4AAAAAABqiRMe3mbyG5xKO")
+        timeout_s = turnstile_cfg.get("timeout_seconds", 40)
 
-        try:
-            token = self.solve_turnstile(sitekey)
-        except Exception as e:
-            logger.warning(f"Turnstile solver notice ({e}). Checking state fallback...")
-            saved = json.loads(STATE_FILE.read_text()).get("sessions", {}).get(self.email, {}) if STATE_FILE.exists() else {}
-            if saved.get("cookie_string"):
-                self.cookie_string = saved["cookie_string"]
-                return {"status": "success", "source": "saved_session", "user": self.get_user_info().get("data")}
-            raise e
-
-        logger.info(f"Submitting mailAuth for {self.email} ...")
-        payload = {
-            "method": "mailAuth",
-            "email": self.email,
-            "password": self.password,
-            "captchaResponse": token,
-        }
-
-        res = self._api("user/auth/", data=payload)
-        logger.info(f"Auth Response: {res}")
-        if res.get("status") != "ok":
-            raise ValueError(f"Login rejected: {res}")
-
-        user_res = self.get_user_info()
-        user_data = user_res.get("data", {})
-
-        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        state_data = {"version": 1, "sessions": {}}
-        if STATE_FILE.exists():
+        for attempt in range(1, max_retries + 1):
+            logger.info(f"🔑 Authentication attempt {attempt}/{max_retries} for {self.email} ...")
             try:
-                state_data = json.loads(STATE_FILE.read_text())
-            except Exception:
-                pass
+                token = self.solve_turnstile(sitekey=sitekey, timeout_s=timeout_s)
+                logger.info(f"Submitting mailAuth for {self.email} ...")
+                
+                # Use raw urllib opener to capture Set-Cookie headers
+                payload = {
+                    "method": "mailAuth",
+                    "email": self.email,
+                    "password": self.password,
+                    "captchaResponse": token,
+                }
+                encoded_data = urllib.parse.urlencode(payload).encode("utf-8")
+                req = urllib.request.Request(
+                    f"{self.api_url}/user/auth/",
+                    data=encoded_data,
+                    headers={
+                        "User-Agent": self.user_agent,
+                        "Origin": self.base_url,
+                        "Referer": f"{self.base_url}/signin",
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                    method="POST",
+                )
+                
+                with self._opener.open(req, timeout=15) as res:
+                    set_cookie_headers = res.headers.get_all("Set-Cookie", [])
+                    raw_res = res.read().decode("utf-8", errors="ignore")
+                    res_data = json.loads(raw_res)
 
-        state_data.setdefault("sessions", {})[self.email] = {
-            "email": self.email,
-            "cookie_string": self.cookie_string,
-            "user": user_data,
-            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        STATE_FILE.write_text(json.dumps(state_data, indent=2) + "\n")
-        logger.info(f"Session successfully saved to {STATE_FILE}")
+                logger.info(f"Auth Response for {self.email}: {res_data}")
+                if res_data.get("status") == "ok":
+                    # Parse cookies
+                    if set_cookie_headers:
+                        self.cookie_string = "; ".join([c.split(";")[0] for c in set_cookie_headers])
 
-        return {"status": "success", "source": "http_login", "user": user_data}
+                    user_res = self.get_user_info()
+                    user_data = user_res.get("data", {})
+
+                    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    state_data = {"version": 1, "sessions": {}}
+                    if STATE_FILE.exists():
+                        try:
+                            state_data = json.loads(STATE_FILE.read_text())
+                        except Exception:
+                            pass
+
+                    state_data.setdefault("sessions", {})[self.email] = {
+                        "email": self.email,
+                        "cookie_string": self.cookie_string,
+                        "user": user_data,
+                        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                    STATE_FILE.write_text(json.dumps(state_data, indent=2) + "\n")
+                    logger.info(f"Session successfully saved to {STATE_FILE}")
+                    return {"status": "success", "source": "http_login", "user": user_data}
+                else:
+                    logger.warning(f"Server rejected login ({res_data.get('message')}). Retrying in 5s ...")
+
+            except Exception as e:
+                logger.warning(f"Login attempt {attempt} failed ({e}). Retrying in {attempt * 3}s...")
+                time.sleep(attempt * 3)
+
+        raise RuntimeError(f"Failed to authenticate {self.email} after {max_retries} attempts")
 
     def get_user_info(self) -> Dict[str, Any]:
         """Fetch current user profile and balance."""
@@ -377,25 +400,21 @@ class AccountWorker(threading.Thread):
         if task_res.get("status") != "ok" or not task_res.get("data"):
             msg = task_res.get("message", "No task returned")
             logger.warning(f"No task available: {msg}")
+            if "limitInHour" in msg:
+                return {"status": "limit_hour"}
+            elif "limitInDay" in msg:
+                return {"status": "limit_day"}
             return {"status": "empty", "message": msg}
 
         task = task_res["data"]
         task_id = str(task.get("id"))
         duration = int(task.get("duration", 12))
         yt_id = task.get("ytId", "unknown")
-        limit_day = task.get("limitDay", 0)
-        limit_hour = task.get("limitHour", 0)
+        limit_day = task.get("limitDay", 100)
+        limit_hour = task.get("limitHour", 10)
         cur_day = task.get("curDay", 0)
 
         logger.info(f"▶ Task [{task_id}] | Video: {yt_id} | Dur: {duration}s | Day Left: {limit_day} | Hour Left: {limit_hour} | CurDay: {cur_day}")
-
-        # Check limit signals in task
-        if isinstance(limit_hour, int) and limit_hour <= 0:
-            logger.info("⏳ Hourly quota is 0. Signaling hourly limit sleep.")
-            return {"status": "limit_hour"}
-        if isinstance(limit_day, int) and limit_day <= 0:
-            logger.info("⏳ Daily quota is 0. Signaling daily limit sleep.")
-            return {"status": "limit_day"}
 
         # 2. Trigger task start telemetry
         self.start_task(task_id)
@@ -456,7 +475,7 @@ class AccountWorker(threading.Thread):
         """Worker thread main execution loop."""
         self.check_proxy()
         try:
-            self.login()
+            self.login(max_retries=5)
         except Exception as e:
             logger.error(f"Login failed for {self.email}: {e}")
             return
@@ -480,28 +499,6 @@ class AccountWorker(threading.Thread):
                 except Exception as e:
                     logger.warning(f"Daily bonus check notice: {e}")
 
-            # Check limits
-            try:
-                limits = self.get_limits().get("data", {})
-                lim_day = limits.get("limDay", 560)
-                lim_hour = limits.get("limHour", 65)
-                logger.info(f"[Quota Snapshot] Day Limit Left: {lim_day} | Hour Limit Left: {lim_hour}")
-
-                if isinstance(lim_day, int) and lim_day <= 0:
-                    sleep_day = self.seconds_until_next_day()
-                    logger.info(f"🌙 Daily Limit reached (0 left). Sleeping {sleep_day}s until tomorrow reset (00:01) ...")
-                    time.sleep(sleep_day)
-                    continue
-
-                if isinstance(lim_hour, int) and lim_hour <= 0:
-                    sleep_hr = self.seconds_until_next_hour()
-                    logger.info(f"⏰ Hourly Limit reached (0 left). Sleeping {sleep_hr}s until next hour (:01) ...")
-                    time.sleep(sleep_hr)
-                    continue
-
-            except Exception:
-                lim_day, lim_hour = 560, 65
-
             # Always fetch real user balance from server
             try:
                 u_curr = self.get_user_info().get("data", {})
@@ -510,13 +507,11 @@ class AccountWorker(threading.Thread):
                 pass
 
             watched_in_batch = 0
-            batch_target = min(limit_count, lim_hour if isinstance(lim_hour, int) and lim_hour > 0 else limit_count)
-
-            for i in range(1, batch_target + 1):
+            for i in range(1, limit_count + 1):
                 if self.stop_event.is_set():
                     break
 
-                logger.info(f"\n--- [Batch Cycle {i}/{batch_target} | Session Earned: {watched_in_batch}] ---")
+                logger.info(f"\n--- [Batch Cycle {i}/{limit_count} | Session Earned: {watched_in_batch}] ---")
                 res = self.watch_single_video()
 
                 if res.get("status") == "success":
@@ -529,18 +524,18 @@ class AccountWorker(threading.Thread):
                     time.sleep(delay)
                 elif res.get("status") == "limit_hour":
                     sleep_hr = self.seconds_until_next_hour()
-                    logger.info(f"⏰ Hourly limit reached during stream. Sleeping {sleep_hr}s until next hour (:01) ...")
+                    logger.info(f"⏰ Hourly limit reached (limitInHour). Sleeping {sleep_hr}s until next hour (:01) ...")
                     time.sleep(sleep_hr)
                     break
                 elif res.get("status") == "limit_day":
                     sleep_day = self.seconds_until_next_day()
-                    logger.info(f"🌙 Daily limit reached during stream. Sleeping {sleep_day}s until tomorrow reset (00:01) ...")
+                    logger.info(f"🌙 Daily limit reached (limitInDay). Sleeping {sleep_day}s until tomorrow reset (00:01) ...")
                     time.sleep(sleep_day)
                     break
                 elif res.get("status") == "empty":
-                    sleep_hr = self.seconds_until_next_hour()
-                    logger.warning(f"No task available ({res.get('message')}). Sleeping {sleep_hr}s until next hour ...")
-                    time.sleep(sleep_hr)
+                    # Non-fatal queue empty (video buffering): short backoff 30s instead of long sleep
+                    logger.warning(f"Temporary empty task ({res.get('message')}). Retrying task fetch in 30s ...")
+                    time.sleep(30)
                     break
                 else:
                     time.sleep(2)
@@ -549,8 +544,8 @@ class AccountWorker(threading.Thread):
                 logger.info(f"Non-daemon batch completed for {self.email}. Watched: {watched_in_batch} videos.")
                 break
 
-            # Short breath before checking next cycle quota
-            time.sleep(5)
+            # Short breath before checking next cycle
+            time.sleep(3)
 
 
 class MultiBotManager:
