@@ -251,6 +251,8 @@ def get_latest_stats() -> dict:
         server_wallet_set = False
 
         last_fetch = _LAST_USER_FETCH.get(email, {})
+        daily_bonus_claimed = False
+        daily_bonus_progress = "0/500"
         if (now_ts - last_fetch.get("timestamp", 0)) < CACHE_TTL_USER:
             balance_val = last_fetch.get("balance", balance_val)
             clovers_val = last_fetch.get("clovers", clovers_val)
@@ -276,6 +278,25 @@ def get_latest_stats() -> dict:
                         email_verified = user_obj.get("emailactive") == "1"
                         remote_wallet = services_obj.get("faucetpayusdt")
                         server_wallet_set = bool(remote_wallet and remote_wallet.strip())
+
+                # Also fetch daily bonus status
+                req_b = urllib.request.Request(
+                    "https://luckywatch.pro/api/user/tasks/dailyBonus/",
+                    data=urllib.parse.urlencode({"method": "getInfo"}).encode("utf-8"),
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36",
+                        "Cookie": cookie_str,
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                )
+                with opener.open(req_b, timeout=3) as res:
+                    b_set = json.loads(res.read().decode("utf-8"))
+                    if b_set.get("status") == "ok":
+                        b_data = b_set.get("data", {})
+                        daily_bonus_cnt = int(b_data.get("dailyBonusCnt", 0))
+                        view_cur_day = int(b_data.get("viewCurDay", 0))
+                        daily_bonus_claimed = daily_bonus_cnt > 0
+                        daily_bonus_progress = f"{view_cur_day}/500"
 
                 # Also fetch user balance
                 req_u = urllib.request.Request(
@@ -357,6 +378,8 @@ def get_latest_stats() -> dict:
             "faucetpay_usdt_trc20": acc.get("faucetpay_usdt_trc20", ""),
             "email_verified": email_verified,
             "server_wallet_set": server_wallet_set,
+            "daily_bonus_claimed": daily_bonus_claimed,
+            "daily_bonus_progress": daily_bonus_progress,
             "country": geo.get("country", "UN"),
             "country_name": geo.get("country_name", "Unknown"),
             "city": geo.get("city", "Unknown"),
@@ -1968,6 +1991,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                     <span>${flag} ${acc.country} • ${acc.egress_ip}</span>
                     <span style="font-size: 10px; margin-left: 4px; padding: 1px 5px; border-radius: 4px; ${acc.email_verified ? 'background: rgba(16,185,129,0.15); color: #34D399;' : 'background: rgba(245,158,11,0.15); color: #FBBF24;'}">
                       ${acc.email_verified ? '✓ Verified' : '⚠ Unverified'}
+                    </span>
+                    <span style="font-size: 10px; margin-left: 4px; padding: 1px 5px; border-radius: 4px; ${acc.daily_bonus_claimed ? 'background: rgba(16,185,129,0.15); color: #34D399;' : 'background: rgba(59,130,246,0.15); color: #60A5FA;'}" title="Daily Activity Bonus">
+                      🎁 ${acc.daily_bonus_claimed ? '$0.01 Done' : (acc.daily_bonus_progress || '0/500')}
                     </span>
                   </div>
                 </div>

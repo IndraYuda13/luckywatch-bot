@@ -413,12 +413,50 @@ class AccountWorker(threading.Thread):
             logger.error(f"❌ [AUTO-WITHDRAW ERROR] Failed to send payout request: {e}")
 
     def claim_daily_bonus(self) -> Dict[str, Any]:
-        """Claim daily login / streak bonus."""
-        info = self._api("user/tasks/dailyBonus/", data={"method": "getInfo"})
-        if info.get("status") == "ok" and (info.get("data", {}).get("available") or info.get("data", {}).get("canGet")):
-            logger.info("Daily Bonus is AVAILABLE! Claiming bonus ...")
-            return self._api("user/tasks/dailyBonus/", data={"method": "getBonus"})
-        return {"status": "skipped", "message": "Daily bonus not ready"}
+        """
+        Smart Daily Activity Bonus Claimer.
+        Tier Rules:
+          - 100 views -> 100 clovers
+          - 200 views -> 500 clovers
+          - 300 views -> 1000 clovers
+          - 400 views -> $0.005 USD
+          - 500 views -> $0.010 USD (MAX PRIZE)
+        Policy:
+          - Daily bonus can ONLY be claimed ONCE per UTC day.
+          - We STRICTLY wait until viewCurDay >= 500 to secure the top $0.01 USD reward.
+          - Never prematurely claim low tiers unless configured otherwise.
+        """
+        try:
+            info = self._api("user/tasks/dailyBonus/", data={"method": "getInfo"})
+            if info.get("status") != "ok" or not info.get("data"):
+                return {"status": "error", "message": "Failed to fetch daily bonus info"}
+
+            data = info["data"]
+            daily_bonus_cnt = int(data.get("dailyBonusCnt", 0))
+            view_cur_day = int(data.get("viewCurDay", 0))
+            sec_left = int(data.get("secondsUntilEndOfDay", 86400))
+
+            # If dailyBonusCnt > 0, bonus for today has already been claimed!
+            if daily_bonus_cnt > 0:
+                logger.debug(f"[{self.email}] Daily bonus already claimed today (dailyBonusCnt: {daily_bonus_cnt}).")
+                return {"status": "already_claimed", "viewCurDay": view_cur_day}
+
+            # Check if reached the maximum 500/500 tier
+            if view_cur_day >= 500:
+                logger.info(f"🏆 [{self.email}] MAX TIER REACHED ({view_cur_day}/500 views)! Claiming $0.010 USD Daily Activity Bonus ...")
+                res = self._api("user/tasks/dailyBonus/", data={"method": "getBonus"})
+                if res.get("status") == "ok":
+                    logger.info(f"🎉 [{self.email}] DAILY BONUS CLAIMED SUCCESSFULLY! Result: {res.get('data')}")
+                else:
+                    logger.warning(f"⚠️ [{self.email}] Daily bonus claim response: {res.get('message')}")
+                return res
+            else:
+                needed = 500 - view_cur_day
+                logger.info(f"⏳ [{self.email}] Daily Bonus Progress: {view_cur_day}/500 views ({needed} more needed for max $0.01 reward). Claim postponed.")
+                return {"status": "in_progress", "viewCurDay": view_cur_day, "needed": needed}
+        except Exception as e:
+            logger.error(f"Error checking daily bonus for {self.email}: {e}")
+            return {"status": "error", "message": str(e)}
 
     def seconds_until_next_hour(self) -> int:
         """Calculate exact seconds until the next hour rollover (:00:15) UTC/local."""
