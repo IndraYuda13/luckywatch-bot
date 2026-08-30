@@ -244,18 +244,41 @@ def get_latest_stats() -> dict:
             },
         )
 
-        # User balance resolution (cache + fast upstream check)
+        # User balance resolution & verification status check (cache + fast upstream check)
         balance_val = str(cached_user.get("balance", "0.0000000"))
         clovers_val = int(cached_user.get("clover", 0))
+        email_verified = False
+        server_wallet_set = False
 
         last_fetch = _LAST_USER_FETCH.get(email, {})
         if (now_ts - last_fetch.get("timestamp", 0)) < CACHE_TTL_USER:
             balance_val = last_fetch.get("balance", balance_val)
             clovers_val = last_fetch.get("clovers", clovers_val)
+            email_verified = last_fetch.get("email_verified", False)
+            server_wallet_set = last_fetch.get("server_wallet_set", False)
         elif cookie_str:
             try:
                 opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
                 req = urllib.request.Request(
+                    "https://luckywatch.pro/api/user/settings/",
+                    data=urllib.parse.urlencode({"method": "get"}).encode("utf-8"),
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36",
+                        "Cookie": cookie_str,
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                )
+                with opener.open(req, timeout=3) as res:
+                    u_set = json.loads(res.read().decode("utf-8"))
+                    if u_set.get("status") == "ok":
+                        user_obj = u_set.get("data", {}).get("user", {})
+                        services_obj = u_set.get("data", {}).get("services", {})
+                        email_verified = user_obj.get("emailactive") == "1"
+                        remote_wallet = services_obj.get("faucetpayusdt")
+                        server_wallet_set = bool(remote_wallet and remote_wallet.strip())
+
+                # Also fetch user balance
+                req_u = urllib.request.Request(
                     "https://luckywatch.pro/api/user/",
                     data=urllib.parse.urlencode({"method": "getCurrentUser"}).encode("utf-8"),
                     headers={
@@ -264,16 +287,19 @@ def get_latest_stats() -> dict:
                         "Content-Type": "application/x-www-form-urlencoded",
                     },
                 )
-                with opener.open(req, timeout=3) as res:
-                    u_res = json.loads(res.read().decode("utf-8"))
+                with opener.open(req_u, timeout=3) as res_u:
+                    u_res = json.loads(res_u.read().decode("utf-8"))
                     if u_res.get("status") == "ok" and "balance" in u_res.get("data", {}):
                         balance_val = str(u_res["data"]["balance"])
                         clovers_val = int(u_res["data"].get("clover", 0))
-                        _LAST_USER_FETCH[email] = {
-                            "timestamp": now_ts,
-                            "balance": balance_val,
-                            "clovers": clovers_val,
-                        }
+
+                _LAST_USER_FETCH[email] = {
+                    "timestamp": now_ts,
+                    "balance": balance_val,
+                    "clovers": clovers_val,
+                    "email_verified": email_verified,
+                    "server_wallet_set": server_wallet_set,
+                }
             except Exception:
                 pass
 
@@ -329,6 +355,8 @@ def get_latest_stats() -> dict:
             "email_redacted": redacted,
             "proxy": proxy_url,
             "faucetpay_usdt_trc20": acc.get("faucetpay_usdt_trc20", ""),
+            "email_verified": email_verified,
+            "server_wallet_set": server_wallet_set,
             "country": geo.get("country", "UN"),
             "country_name": geo.get("country_name", "Unknown"),
             "city": geo.get("city", "Unknown"),
@@ -1929,6 +1957,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                   </div>
                   <div class="proxy-flag-chip">
                     <span>${flag} ${acc.country} • ${acc.egress_ip}</span>
+                    <span style="font-size: 10px; margin-left: 4px; padding: 1px 5px; border-radius: 4px; ${acc.email_verified ? 'background: rgba(16,185,129,0.15); color: #34D399;' : 'background: rgba(245,158,11,0.15); color: #FBBF24;'}">
+                      ${acc.email_verified ? '✓ Verified' : '⚠ Unverified'}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -2001,11 +2032,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
             <div class="card-footer-actions">
               <div style="display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0;">
-                <span class="mono" style="font-size: 10px; color: ${acc.faucetpay_usdt_trc20 ? 'var(--emerald-bright)' : 'var(--text-tertiary)'}; cursor: pointer; text-decoration: underline dotted;" onclick="openWalletModal('${acc.email}', '${acc.faucetpay_usdt_trc20 || ''}')" title="${acc.faucetpay_usdt_trc20 || 'Click to set FaucetPay USDT TRC20'}">
-                  ${acc.faucetpay_usdt_trc20 ? 'TRC20: ' + acc.faucetpay_usdt_trc20.slice(0, 5) + '...' + acc.faucetpay_usdt_trc20.slice(-4) : '⚠️ Set FaucetPay Wallet'}
+                <span class="mono" style="font-size: 10px; color: ${acc.server_wallet_set ? 'var(--emerald-bright)' : (acc.faucetpay_usdt_trc20 ? 'var(--cyan)' : 'var(--text-tertiary)')}; cursor: pointer; text-decoration: underline dotted;" onclick="openWalletModal('${acc.email}', '${acc.faucetpay_usdt_trc20 || ''}')" title="${acc.faucetpay_usdt_trc20 || 'Click to set FaucetPay USDT TRC20'}">
+                  ${acc.server_wallet_set ? '🟢 TRC20: ' + acc.faucetpay_usdt_trc20.slice(0, 4) + '...' + acc.faucetpay_usdt_trc20.slice(-4) : (acc.faucetpay_usdt_trc20 ? '🟡 Local TRC20' : '⚠️ Set Wallet')}
                 </span>
               </div>
               <div style="display: flex; gap: 6px;">
+                ${!acc.email_verified ? `<button class="btn-action" style="padding: 3px 8px; font-size: 10.5px; background: rgba(245,158,11,0.15); color: #FBBF24; border: 1px solid rgba(245,158,11,0.3);" onclick="sendEmailVerify('${acc.email}')" title="Send email verification code">📩 Verif</button>` : ''}
                 <button class="btn-action" style="padding: 3px 8px; font-size: 10.5px;" onclick="openWalletModal('${acc.email}', '${acc.faucetpay_usdt_trc20 || ''}')" title="Configure Wallet">⚙️</button>
                 <button class="btn-action ${isReady && acc.faucetpay_usdt_trc20 ? 'gold-tier' : ''}" style="padding: 3px 8px; font-size: 10.5px; ${isReady && acc.faucetpay_usdt_trc20 ? 'background: var(--gold-gradient); color: #000; font-weight: 700;' : ''}" onclick="triggerWithdraw('${acc.email}')" ${!acc.faucetpay_usdt_trc20 || !isReady ? 'disabled title=\"Wallet not set or balance below threshold\"' : 'title=\"Withdraw to FaucetPay USDT TRC20\"'}>💸 Payout</button>
                 <button class="btn-action" style="padding: 3px 8px; font-size: 10.5px;" onclick="focusAccountLogs('${acc.email_redacted}')">Logs</button>
@@ -2216,6 +2248,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       });
     }
 
+    async function sendEmailVerify(email) {
+      showToast(`Sending verification link for ${email}...`);
+      try {
+        const res = await fetch('/api/actions/send_verify_email', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: email })
+        });
+        const result = await res.json();
+        showToast(result.message || 'Verification email sent! Check inbox/spam.');
+      } catch (err) {
+        showToast(`Error sending verification email: ${err.message}`);
+      }
+    }
+
     /* WALLET MODAL & ACTIONS */
     function openWalletModal(email, currentWallet) {
       currentModalEmail = email;
@@ -2424,6 +2471,40 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, {"status": "ok", "message": f"Wallet {wallet_addr[:6]}... saved for {target_email}!"})
             except Exception as e:
                 self._send_json(500, {"status": "error", "message": f"Failed to save wallet: {e}"})
+
+        elif path == "/api/actions/send_verify_email":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length).decode("utf-8")) if length > 0 else {}
+                target_email = body.get("email")
+
+                if not target_email or not STATE_FILE.exists() or not CONFIG_FILE.exists():
+                    self._send_json(400, {"status": "error", "message": "Invalid request."})
+                    return
+
+                cfg = json.loads(CONFIG_FILE.read_text())
+                st = json.loads(STATE_FILE.read_text())
+                sess = st.get("sessions", {}).get(target_email, {})
+                cookie_str = sess.get("cookie_string", "")
+
+                if not cookie_str:
+                    self._send_json(400, {"status": "error", "message": "No active session for this account."})
+                    return
+
+                proxy_url = next((a.get("proxy") for a in cfg.get("accounts", []) if a.get("email") == target_email), "http://127.0.0.1:31001")
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
+                req = urllib.request.Request(
+                    "https://luckywatch.pro/api/user/settings/confirm/",
+                    data=urllib.parse.urlencode({"method": "reqConfirm"}).encode("utf-8"),
+                    headers={"Cookie": cookie_str, "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0"},
+                )
+                res = json.loads(opener.open(req, timeout=6).read().decode("utf-8"))
+                if res.get("status") == "ok":
+                    self._send_json(200, {"status": "ok", "message": f"Verification email sent to {target_email}! Please check inbox & click confirm link."})
+                else:
+                    self._send_json(200, {"status": "notice", "message": f"Server response: {res.get('message')}."})
+            except Exception as e:
+                self._send_json(500, {"status": "error", "message": f"Failed to send verify email: {e}"})
 
         elif path == "/api/actions/withdraw":
             try:
