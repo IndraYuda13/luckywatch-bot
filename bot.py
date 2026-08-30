@@ -119,7 +119,7 @@ class AccountWorker(threading.Thread):
             return {"status": "error", "message": str(e)}
 
     def load_saved_session(self) -> bool:
-        """Load session cookies from JSON state and validate via REST API."""
+        """Load session cookies from JSON state and validate via streaming / REST APIs."""
         if not STATE_FILE.exists():
             return False
         try:
@@ -130,14 +130,33 @@ class AccountWorker(threading.Thread):
 
             self.cookie_string = session["cookie_string"]
             logger.info(f"Found saved session for {self.email}. Validating session ...")
+
+            # 1. Primary check: get_user_info()
             user_data = self.get_user_info()
-            if user_data.get("status") == "ok" and (user_data.get("data", {}).get("email") == self.email or user_data.get("data", {}).get("id")):
+            if user_data.get("status") == "ok" and (user_data.get("data", {}).get("email") == self.email or user_data.get("data", {}).get("id") or user_data.get("data", {}).get("balance") is not None):
                 u = user_data.get("data", {})
                 logger.info(f"Session is VALID! User: {u.get('email', self.email)} | Balance: ${u.get('balance', '0.0000000')} | Clovers: {u.get('clover', 0)}")
                 return True
+
+            # 2. Secondary check: Task streaming probe (checkIp / getLimits / get task)
+            # LuckyWatch tasks API is often 100% authorized even when profile endpoint hits checkSecurity
+            t_res = self._api("user/tasks/", data={"method": "getLimits"})
+            if t_res.get("status") == "ok" or (isinstance(t_res.get("data"), dict) and "limitDay" in t_res["data"]):
+                d = t_res.get("data", {})
+                logger.info(f"Session is VALID via Task Engine! Limits: Day={d.get('limitDay', '?')}, Hour={d.get('limitHour', '?')}")
+                return True
+
+            # 3. Tertiary probe: check active task
+            p_res = self._api("user/tasks/", data={"method": "get"})
+            if p_res.get("status") == "ok" or "limitInHour" in p_res.get("message", "") or "limitInDay" in p_res.get("message", ""):
+                bal = p_res.get("data", {}).get("balance", "0.0000000") if isinstance(p_res.get("data"), dict) else "0.0000000"
+                logger.info(f"Session is VALID via Stream Probe! Balance: ${bal}")
+                return True
+
         except Exception as e:
             logger.warning(f"Error loading saved session: {e}")
 
+        logger.warning(f"Saved session for {self.email} is expired or invalid. Triggering fresh authentication...")
         self.cookie_string = ""
         return False
 
@@ -603,8 +622,9 @@ class AccountWorker(threading.Thread):
             # Always fetch real user balance from server and check auto-withdraw
             try:
                 u_curr = self.get_user_info().get("data", {})
-                bal_val = float(u_curr.get('balance', 0.0))
-                logger.info(f"💰 REAL BALANCE: ${u_curr.get('balance')} USD | Clovers: {u_curr.get('clover')}")
+                bal_val = float(u_curr.get('balance', 0.0) or 0.0)
+                if u_curr.get('balance') is not None:
+                    logger.info(f"💰 REAL BALANCE: ${u_curr.get('balance')} USD | Clovers: {u_curr.get('clover', 0)}")
                 self.check_and_trigger_auto_withdraw(bal_val)
             except Exception:
                 pass
@@ -764,7 +784,8 @@ class AccountWorker(threading.Thread):
             # Always fetch real user balance from server
             try:
                 u_curr = self.get_user_info().get("data", {})
-                logger.info(f"💰 REAL BALANCE: ${u_curr.get('balance')} USD | Clovers: {u_curr.get('clover')}")
+                if u_curr.get('balance') is not None:
+                    logger.info(f"💰 REAL BALANCE: ${u_curr.get('balance')} USD | Clovers: {u_curr.get('clover', 0)}")
             except Exception:
                 pass
 
