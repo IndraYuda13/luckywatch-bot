@@ -347,8 +347,47 @@ class AccountWorker(threading.Thread):
         raise RuntimeError(f"Failed to authenticate {self.email} after {max_retries} attempts (Proxy batch offset: {attempt_offset})")
 
     def get_user_info(self) -> Dict[str, Any]:
-        """Fetch current user profile and balance."""
-        return self._api("user/", data={"method": "getCurrentUser"})
+        """Fetch current user profile and balance with multi-endpoint fallback."""
+        res = self._api("user/", data={"method": "getCurrentUser"})
+        if res.get("status") == "ok" and res.get("data") and res.get("data", {}).get("balance") is not None:
+            u_d = res["data"]
+            self._last_known_balance = str(u_d.get("balance", "0.0000000"))
+            if "clover" in u_d:
+                self._last_known_clovers = u_d.get("clover", 0)
+            return res
+
+        # Fallback 1: Check user/settings/
+        s_res = self._api("user/settings/", data={"method": "get"})
+        if s_res.get("status") == "ok" and s_res.get("data", {}).get("user"):
+            u_data = s_res["data"]["user"]
+            if u_data.get("balance") is not None:
+                self._last_known_balance = str(u_data.get("balance"))
+                if "clover" in u_data:
+                    self._last_known_clovers = u_data.get("clover", 0)
+                return {
+                    "status": "ok",
+                    "data": {
+                        "email": self.email,
+                        "balance": str(u_data.get("balance")),
+                        "clover": u_data.get("clover", getattr(self, "_last_known_clovers", 0)),
+                        "id": str(u_data.get("id", "")),
+                    }
+                }
+
+        # Fallback 2: Use real-time balance tracked from active task stream (user/tasks/)
+        bal = getattr(self, "_last_known_balance", None)
+        if bal is not None:
+            return {
+                "status": "ok",
+                "data": {
+                    "email": self.email,
+                    "balance": str(bal),
+                    "clover": getattr(self, "_last_known_clovers", 0),
+                    "id": "",
+                }
+            }
+
+        return res
 
     def get_limits(self) -> Dict[str, Any]:
         """Fetch daily/hourly video viewing limits."""
@@ -626,6 +665,15 @@ class AccountWorker(threading.Thread):
         limit_day = task.get("limitDay", 100)
         limit_hour = task.get("limitHour", 10)
         cur_day = task.get("curDay", 0)
+
+        # Track live balance directly from task stream response!
+        if "balance" in task:
+            self._last_known_balance = str(task["balance"])
+            try:
+                # Clovers is roughly balance / 0.00025 * 15 or tracked directly
+                self._last_known_clovers = int(float(task["balance"]) / 0.00025 * 15)
+            except Exception:
+                pass
 
         logger.info(f"▶ Task [{task_id}] | Video: {yt_id} | Dur: {duration}s | Day Left: {limit_day} | Hour Left: {limit_hour} | CurDay: {cur_day}")
 
