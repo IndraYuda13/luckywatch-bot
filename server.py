@@ -216,6 +216,146 @@ def get_latest_stats() -> dict:
     accounts_list = []
     formatted_acc_logs = {}
 
+    # Optimization: Fetch all account upstream balances in parallel or background thread
+    from concurrent.futures import ThreadPoolExecutor
+
+    def fetch_account_upstream(acc_data):
+        email, cookie_str, proxy_url = acc_data
+        if not cookie_str:
+            return email, {}
+        try:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
+            # Fast profile check
+            req = urllib.request.Request(
+                "https://luckywatch.pro/api/user/settings/",
+                data=urllib.parse.urlencode({"method": "get"}).encode("utf-8"),
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36",
+                    "Cookie": cookie_str,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+            )
+            email_verified = False
+            server_wallet_set = False
+            with opener.open(req, timeout=2.5) as res:
+                u_set = json.loads(res.read().decode("utf-8"))
+                if u_set.get("status") == "ok":
+                    user_obj = u_set.get("data", {}).get("user", {})
+                    services_obj = u_set.get("data", {}).get("services", {})
+                    email_verified = user_obj.get("emailactive") == "1"
+                    remote_wallet = services_obj.get("faucetpayusdt")
+                    server_wallet_set = bool(remote_wallet and remote_wallet.strip())
+
+            # Fast daily bonus check
+            req_b = urllib.request.Request(
+                "https://luckywatch.pro/api/user/tasks/dailyBonus/",
+                data=urllib.parse.urlencode({"method": "getInfo"}).encode("utf-8"),
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36",
+                    "Cookie": cookie_str,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+            )
+            daily_bonus_claimed = False
+            daily_bonus_progress = "0/500"
+            with opener.open(req_b, timeout=2.5) as res:
+                b_set = json.loads(res.read().decode("utf-8"))
+                if b_set.get("status") == "ok":
+                    b_data = b_set.get("data", {})
+                    daily_bonus_cnt = int(b_data.get("dailyBonusCnt", 0))
+                    view_cur_day = int(b_data.get("viewCurDay", 0))
+                    daily_bonus_claimed = daily_bonus_cnt > 0
+                    daily_bonus_progress = f"{view_cur_day}/500"
+
+            # Fast user balance check
+            req_u = urllib.request.Request(
+                "https://luckywatch.pro/api/user/",
+                data=urllib.parse.urlencode({"method": "getCurrentUser"}).encode("utf-8"),
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36",
+                    "Cookie": cookie_str,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+            )
+            bal_val = "0.0000000"
+            clov_val = 0
+            with opener.open(req_u, timeout=2.5) as res:
+                u_data = json.loads(res.read().decode("utf-8"))
+                if u_data.get("status") == "ok":
+                    bal_val = str(u_data.get("data", {}).get("balance", "0.0000000"))
+                    clov_val = int(u_data.get("data", {}).get("clover", 0))
+
+            # Fetch last payout history
+            last_payout = None
+            try:
+                req_p = urllib.request.Request(
+                    "https://luckywatch.pro/api/user/payout/",
+                    data=urllib.parse.urlencode({"method": "history", "page": "1"}).encode("utf-8"),
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36",
+                        "Cookie": cookie_str,
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                )
+                with opener.open(req_p, timeout=2.5) as res:
+                    p_res = json.loads(res.read().decode("utf-8"))
+                    if p_res.get("status") == "ok":
+                        items = p_res.get("data", {}).get("items", [])
+                        if items:
+                            first = items[0]
+                            st_code = str(first.get("status", ""))
+                            status_map = {
+                                "0": "PAYMENT ERROR",
+                                "1": "PAID",
+                                "2": "IN PROGRESS",
+                                "3": "UNDER REVIEW"
+                            }
+                            st_label = status_map.get(st_code, f"CODE_{st_code}")
+                            ts_val = int(first.get("unixtime", 0))
+                            dt_str = datetime.fromtimestamp(ts_val).strftime("%Y-%m-%d %H:%M") if ts_val > 0 else "-"
+                            last_payout = {
+                                "id": first.get("id"),
+                                "amount": str(first.get("val", "0.00000")),
+                                "net_amount": str(first.get("commissionVal", "0.00000")),
+                                "wallet": first.get("account", ""),
+                                "status": st_label,
+                                "timestamp": dt_str
+                            }
+            except Exception:
+                pass
+
+            return email, {
+                "balance": bal_val,
+                "clovers": clov_val,
+                "email_verified": email_verified,
+                "server_wallet_set": server_wallet_set,
+                "daily_bonus_claimed": daily_bonus_claimed,
+                "daily_bonus_progress": daily_bonus_progress,
+                "last_payout": last_payout,
+                "timestamp": time.time(),
+            }
+        except Exception:
+            return email, {}
+
+    # Parallel fetch for all accounts needing fresh data
+    accounts_to_fetch = []
+    for acc in config_accounts:
+        em = acc.get("email", "")
+        last_f = _LAST_USER_FETCH.get(em, {})
+        if (now_ts - last_f.get("timestamp", 0)) >= CACHE_TTL_USER:
+            sess = sessions_map.get(em, {})
+            c_str = sess.get("cookie_string", "")
+            p_url = acc.get("proxy", "")
+            if c_str:
+                accounts_to_fetch.append((em, c_str, p_url))
+
+    if accounts_to_fetch:
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            results = executor.map(fetch_account_upstream, accounts_to_fetch)
+            for em, data in results:
+                if data:
+                    _LAST_USER_FETCH[em] = data
+
     for acc in config_accounts:
         email = acc.get("email", "")
         redacted = redact_email(email)

@@ -52,7 +52,7 @@ class AccountWorker(threading.Thread):
         self.proxy_url = self.account.get("proxy") or self.global_config.get("proxy", {}).get("url")
         self.base_url = self.global_config.get("app", {}).get("base_url", "https://luckywatch.pro").rstrip("/")
         self.api_url = f"{self.base_url}/api"
-        self.user_agent = "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
+        self.user_agent = "Mozilla/5.0"
         self.cookie_string = ""
         self._opener = self._build_opener()
 
@@ -131,9 +131,9 @@ class AccountWorker(threading.Thread):
             self.cookie_string = session["cookie_string"]
             logger.info(f"Found saved session for {self.email}. Validating session ...")
             user_data = self.get_user_info()
-            if user_data.get("status") == "ok" and user_data.get("data", {}).get("email") == self.email:
-                u = user_data["data"]
-                logger.info(f"Session is VALID! User: {u.get('email')} | Balance: ${u.get('balance')} | Clovers: {u.get('clover')}")
+            if user_data.get("status") == "ok" and (user_data.get("data", {}).get("email") == self.email or user_data.get("data", {}).get("id")):
+                u = user_data.get("data", {})
+                logger.info(f"Session is VALID! User: {u.get('email', self.email)} | Balance: ${u.get('balance', '0.0000000')} | Clovers: {u.get('clover', 0)}")
                 return True
         except Exception as e:
             logger.warning(f"Error loading saved session: {e}")
