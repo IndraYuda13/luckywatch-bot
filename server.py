@@ -230,14 +230,14 @@ def get_latest_stats() -> dict:
                 "https://luckywatch.pro/api/user/settings/",
                 data=urllib.parse.urlencode({"method": "get"}).encode("utf-8"),
                 headers={
-                    "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36",
+                    "User-Agent": "Mozilla/5.0",
                     "Cookie": cookie_str,
                     "Content-Type": "application/x-www-form-urlencoded",
                 },
             )
             email_verified = False
             server_wallet_set = False
-            with opener.open(req, timeout=2.5) as res:
+            with opener.open(req, timeout=3.5) as res:
                 u_set = json.loads(res.read().decode("utf-8"))
                 if u_set.get("status") == "ok":
                     user_obj = u_set.get("data", {}).get("user", {})
@@ -251,14 +251,14 @@ def get_latest_stats() -> dict:
                 "https://luckywatch.pro/api/user/tasks/dailyBonus/",
                 data=urllib.parse.urlencode({"method": "getInfo"}).encode("utf-8"),
                 headers={
-                    "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36",
+                    "User-Agent": "Mozilla/5.0",
                     "Cookie": cookie_str,
                     "Content-Type": "application/x-www-form-urlencoded",
                 },
             )
             daily_bonus_claimed = False
             daily_bonus_progress = "0/500"
-            with opener.open(req_b, timeout=2.5) as res:
+            with opener.open(req_b, timeout=3.5) as res:
                 b_set = json.loads(res.read().decode("utf-8"))
                 if b_set.get("status") == "ok":
                     b_data = b_set.get("data", {})
@@ -272,14 +272,14 @@ def get_latest_stats() -> dict:
                 "https://luckywatch.pro/api/user/",
                 data=urllib.parse.urlencode({"method": "getCurrentUser"}).encode("utf-8"),
                 headers={
-                    "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36",
+                    "User-Agent": "Mozilla/5.0",
                     "Cookie": cookie_str,
                     "Content-Type": "application/x-www-form-urlencoded",
                 },
             )
             bal_val = "0.0000000"
             clov_val = 0
-            with opener.open(req_u, timeout=2.5) as res:
+            with opener.open(req_u, timeout=3.5) as res:
                 u_data = json.loads(res.read().decode("utf-8"))
                 if u_data.get("status") == "ok":
                     bal_val = str(u_data.get("data", {}).get("balance", "0.0000000"))
@@ -292,12 +292,12 @@ def get_latest_stats() -> dict:
                     "https://luckywatch.pro/api/user/payout/",
                     data=urllib.parse.urlencode({"method": "history", "page": "1"}).encode("utf-8"),
                     headers={
-                        "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36",
+                        "User-Agent": "Mozilla/5.0",
                         "Cookie": cookie_str,
                         "Content-Type": "application/x-www-form-urlencoded",
                     },
                 )
-                with opener.open(req_p, timeout=2.5) as res:
+                with opener.open(req_p, timeout=3.5) as res:
                     p_res = json.loads(res.read().decode("utf-8"))
                     if p_res.get("status") == "ok":
                         items = p_res.get("data", {}).get("items", [])
@@ -418,6 +418,11 @@ def get_latest_stats() -> dict:
                         email_verified = user_obj.get("emailactive") == "1"
                         remote_wallet = services_obj.get("faucetpayusdt")
                         server_wallet_set = bool(remote_wallet and remote_wallet.strip())
+                        # If user object contains real-time balance
+                        if "balance" in user_obj:
+                            bal_val = str(user_obj.get("balance", bal_val))
+                        if "clover" in user_obj:
+                            clov_val = int(user_obj.get("clover", clov_val))
 
                 # Also fetch daily bonus status
                 req_b = urllib.request.Request(
