@@ -290,6 +290,32 @@ def get_latest_stats() -> dict:
         else:
             task_dict = None
 
+        # Fetch latest payout history item if available
+        last_payout = None
+        if cookie_str:
+            try:
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
+                req_h = urllib.request.Request(
+                    "https://luckywatch.pro/api/user/payout/",
+                    data=urllib.parse.urlencode({"method": "history", "page": 1}).encode("utf-8"),
+                    headers={"Cookie": cookie_str, "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0"},
+                )
+                with opener.open(req_h, timeout=2) as res_h:
+                    h_data = json.loads(res_h.read().decode("utf-8")).get("data", {}).get("history", {}).get("data", [])
+                    if h_data:
+                        item = h_data[0]
+                        status_map = {"0": "COMPLETED", "1": "CANCELLED", "2": "IN PROGRESS"}
+                        last_payout = {
+                            "id": item.get("id"),
+                            "amount": item.get("val"),
+                            "net_amount": item.get("commissionVal"),
+                            "wallet": item.get("account"),
+                            "status": status_map.get(str(item.get("status")), "IN PROGRESS"),
+                            "timestamp": time.strftime("%Y-%m-%d %H:%M", time.localtime(int(item.get("unixtime", 0)))),
+                        }
+            except Exception:
+                pass
+
         acc_obj = {
             "email": email,
             "email_redacted": redacted,
@@ -308,6 +334,7 @@ def get_latest_stats() -> dict:
             "hourly_done": live_st.get("hourly_done", 0),
             "hourly_cap": live_st.get("hourly_cap", 65),
             "current_task": task_dict,
+            "last_payout": last_payout,
             "countdown_sleep": live_st.get("countdown_sleep", 0),
             "error_reason": live_st.get("error_reason"),
             "last_activity_time": live_st.get("last_activity_time", "-"),
@@ -1952,6 +1979,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               <div class="activity-content">${taskInfo}</div>
               <span class="mono" style="font-size: 10px; color: var(--text-tertiary);">${acc.last_activity_time}</span>
             </div>
+
+            ${acc.last_payout ? `
+              <div style="background: rgba(234, 179, 8, 0.08); border: 1px dashed rgba(234, 179, 8, 0.3); border-radius: 8px; padding: 6px 10px; display: flex; justify-content: space-between; align-items: center; font-size: 11px;">
+                <div style="display: flex; align-items: center; gap: 6px;">
+                  <span>💸</span>
+                  <span class="mono" style="font-weight: 700; color: #FDE047;">$${acc.last_payout.amount} USD</span>
+                  <span style="color: var(--text-tertiary);">(${acc.last_payout.status})</span>
+                </div>
+                <span class="mono" style="font-size: 10px; color: var(--text-tertiary);">${acc.last_payout.timestamp.split(' ')[1] || ''}</span>
+              </div>
+            ` : ''}
 
             <div class="card-footer-actions">
               <div style="display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0;">
