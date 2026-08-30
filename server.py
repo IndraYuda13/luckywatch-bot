@@ -284,6 +284,24 @@ def get_latest_stats() -> dict:
                     bal_val = str(u_data.get("data", {}).get("balance", "0.0000000"))
                     clov_val = int(u_data.get("data", {}).get("clover", 0))
 
+            # Fallback balance probe from user/tasks/ if checkSecurity blocks getCurrentUser
+            if bal_val == "0.0000000":
+                try:
+                    req_t = urllib.request.Request(
+                        "https://luckywatch.pro/api/user/tasks/",
+                        data=urllib.parse.urlencode({"method": "get"}).encode("utf-8"),
+                        headers={"User-Agent": "Mozilla/5.0", "Cookie": cookie_str, "Content-Type": "application/x-www-form-urlencoded"},
+                    )
+                    with opener.open(req_t, timeout=3.5) as res_t:
+                        t_data = json.loads(res_t.read().decode("utf-8"))
+                        if t_data.get("status") == "ok" and isinstance(t_data.get("data"), dict):
+                            t_bal = t_data["data"].get("balance")
+                            if t_bal is not None:
+                                bal_val = str(t_bal)
+                                clov_val = int(float(t_bal) / 0.00025 * 15)
+                except Exception:
+                    pass
+
             # Fetch last payout history
             last_payout = None
             try:
