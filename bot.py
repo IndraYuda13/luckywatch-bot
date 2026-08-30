@@ -739,8 +739,23 @@ class AccountWorker(threading.Thread):
                             "reward": r_amt,
                             "yt_id": yt_id,
                         }
+                    elif sub_res.get("status") == "data" and sub_res.get("data", {}).get("image"):
+                        # Captcha coordinates were slightly off, LuckyWatch served a fresh captcha challenge!
+                        logger.info(f"🔄 Captcha challenge refreshed by server. Solving new attempt ...")
+                        new_q = sub_res["data"].get("queue", q_b64)
+                        new_img = sub_res["data"].get("image")
+                        res_solve2 = self.solve_icon_captcha(queue_base64=new_q, image_base64=new_img)
+                        if res_solve2:
+                            sol2, samp2 = res_solve2
+                            sub_res2 = self.submit_captcha_coordinates(sol2)
+                            if sub_res2.get("status") == "ok" and "reward" in sub_res2.get("data", {}):
+                                r_amt2 = sub_res2["data"]["reward"]
+                                logger.info(f"🎉 CAPTCHA (RETRY) SOLVED & CLAIMED! Reward: +${r_amt2} USD!")
+                                self.send_solver_feedback(samp2, verified=True)
+                                return {"status": "success", "task_id": task_id, "reward": r_amt2, "yt_id": yt_id}
+                        return {"status": "retry_captcha", "message": "Captcha retry unresolved"}
                     else:
-                        logger.warning(f"Captcha submit response: {sub_res}")
+                        logger.warning(f"Captcha submit notice: {sub_res.get('message', sub_res)}")
                         return {"status": "retry_captcha", "message": str(sub_res)}
 
             return {"status": "skipped_captcha", "task_id": task_id}
