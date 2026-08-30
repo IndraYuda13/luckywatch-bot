@@ -304,7 +304,15 @@ def get_latest_stats() -> dict:
                     h_data = json.loads(res_h.read().decode("utf-8")).get("data", {}).get("history", {}).get("data", [])
                     if h_data:
                         item = h_data[0]
-                        status_map = {"0": "COMPLETED", "1": "CANCELLED", "2": "IN PROGRESS"}
+                        # LuckyWatch Payout Status Mapping (from live /payouts?tab=history DOM inspection):
+                        # status: "1" = PAID (Dibayar)
+                        # status: "2" = IN PROGRESS / PROCESSING
+                        # status: "0" = CANCELLED / ERROR
+                        status_map = {
+                            "1": "PAID",
+                            "2": "IN PROGRESS",
+                            "0": "PAYMENT ERROR"
+                        }
                         last_payout = {
                             "id": item.get("id"),
                             "amount": item.get("val"),
@@ -1981,11 +1989,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             </div>
 
             ${acc.last_payout ? `
-              <div style="background: rgba(234, 179, 8, 0.08); border: 1px dashed rgba(234, 179, 8, 0.3); border-radius: 8px; padding: 6px 10px; display: flex; justify-content: space-between; align-items: center; font-size: 11px;">
+              <div style="background: rgba(16, 185, 129, 0.08); border: 1px dashed rgba(16, 185, 129, 0.3); border-radius: 8px; padding: 6px 10px; display: flex; justify-content: space-between; align-items: center; font-size: 11px;">
                 <div style="display: flex; align-items: center; gap: 6px;">
-                  <span>💸</span>
-                  <span class="mono" style="font-weight: 700; color: #FDE047;">$${acc.last_payout.amount} USD</span>
-                  <span style="color: var(--text-tertiary);">(${acc.last_payout.status})</span>
+                  <span>🎉</span>
+                  <span class="mono" style="font-weight: 700; color: var(--emerald-bright);">$${acc.last_payout.amount} USD</span>
+                  <span class="status-badge-chip chip-active" style="padding: 2px 6px; font-size: 9.5px;">${acc.last_payout.status}</span>
                 </div>
                 <span class="mono" style="font-size: 10px; color: var(--text-tertiary);">${acc.last_payout.timestamp.split(' ')[1] || ''}</span>
               </div>
