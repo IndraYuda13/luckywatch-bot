@@ -110,7 +110,7 @@ def parse_bot_logs(max_lines: int = 150) -> Tuple[List[str], Dict[str, List[str]
     account_logs: Dict[str, List[str]] = {}
     account_live_state: Dict[str, Dict[str, Any]] = {}
 
-    scan_lines = lines[-800:] if len(lines) > 800 else lines
+    scan_lines = lines[-1200:] if len(lines) > 1200 else lines
 
     for line in scan_lines:
         m = re.match(r"^(\d{2}:\d{2}:\d{2})\s+\[(\w+)\]\s+(?:\[([\w\.-]+)\]\s+)?(.*)$", line)
@@ -121,6 +121,11 @@ def parse_bot_logs(max_lines: int = 150) -> Tuple[List[str], Dict[str, List[str]
             continue
 
         tag_clean = tag.lower()
+        # Also store into per-account log buffer (up to 150 lines per account)
+        account_logs.setdefault(tag_clean, []).append(line)
+        if len(account_logs[tag_clean]) > 150:
+            account_logs[tag_clean].pop(0)
+
         state = account_live_state.setdefault(
             tag_clean,
             {
@@ -182,12 +187,6 @@ def parse_bot_logs(max_lines: int = 150) -> Tuple[List[str], Dict[str, List[str]
             if state["current_task"]:
                 state["current_task"]["status"] = "CAPTCHA_SOLVING"
             state["status"] = "ACTIVE"
-
-    for line in tail:
-        m = re.match(r"^(\d{2}:\d{2}:\d{2})\s+\[(\w+)\]\s+(?:\[([\w\.-]+)\]\s+)?(.*)$", line)
-        if m and m.group(3):
-            tag_clean = m.group(3).lower()
-            account_logs.setdefault(tag_clean, []).append(line)
 
     return tail, account_logs, account_live_state
 
@@ -393,11 +392,16 @@ def get_latest_stats() -> dict:
         last_fetch = _LAST_USER_FETCH.get(email, {})
         daily_bonus_claimed = False
         daily_bonus_progress = "0/500"
+        last_payout = None
+
         if (now_ts - last_fetch.get("timestamp", 0)) < CACHE_TTL_USER:
             balance_val = last_fetch.get("balance", balance_val)
             clovers_val = last_fetch.get("clovers", clovers_val)
             email_verified = last_fetch.get("email_verified", False)
             server_wallet_set = last_fetch.get("server_wallet_set", False)
+            daily_bonus_claimed = last_fetch.get("daily_bonus_claimed", False)
+            daily_bonus_progress = last_fetch.get("daily_bonus_progress", "0/500")
+            last_payout = last_fetch.get("last_payout")
         elif cookie_str:
             try:
                 opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
@@ -544,7 +548,14 @@ def get_latest_stats() -> dict:
             "last_activity_time": live_st.get("last_activity_time", "-"),
         }
         accounts_list.append(acc_obj)
-        formatted_acc_logs[redacted] = raw_acc_logs.get(acc_prefix, [])
+        # Match by prefix (e.g. 'halolakapa13' or 'halolakapa')
+        matching_logs = raw_acc_logs.get(acc_prefix, [])
+        if not matching_logs:
+            for k, logs in raw_acc_logs.items():
+                if k in acc_prefix or acc_prefix in k:
+                    matching_logs = logs
+                    break
+        formatted_acc_logs[redacted] = matching_logs
 
     # Fleet-wide calculations
     total_balance = sum([float(a["balance"]) for a in accounts_list]) if accounts_list else 0.0
@@ -565,6 +576,14 @@ def get_latest_stats() -> dict:
         "total_tasks_today": total_tasks_today,
     }
 
+    auto_cfg = {}
+    if CONFIG_FILE.exists():
+        try:
+            cfg = json.loads(CONFIG_FILE.read_text())
+            auto_cfg = cfg.get("auto_withdraw", {})
+        except Exception:
+            pass
+
     # Backward compatibility fields for legacy clients
     return {
         "email": f"{len(accounts_list)} Active Account(s)" if accounts_list else "Multi-Worker",
@@ -575,6 +594,7 @@ def get_latest_stats() -> dict:
         "accounts": accounts_list,
         "logs": tail_logs,
         "account_logs": formatted_acc_logs,
+        "auto_withdraw": auto_cfg,
         "service_status": "RUNNING 24/7 (MULTI-THREAD)",
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
@@ -1695,7 +1715,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <p>Real-time payout target tracking with dynamic threshold calculation per account & fleet</p>
         </div>
 
-        <div class="threshold-selector">
+        <div class="threshold-selector" style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
           <span style="font-size: 11px; font-weight: 700; color: var(--text-tertiary); text-transform: uppercase; padding: 0 4px;">Target:</span>
           <button class="preset-pill" onclick="setThreshold(0.10)" id="pill-010">$0.10</button>
           <button class="preset-pill" onclick="setThreshold(0.50)" id="pill-050">$0.50</button>
@@ -1704,6 +1724,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <div class="custom-threshold-wrap">
             <span>$</span>
             <input type="number" step="0.05" min="0.01" max="100" class="custom-threshold-input" id="custom-threshold-input" placeholder="Custom" onchange="handleCustomThreshold(this.value)" />
+          </div>
+          <div style="border-left: 1px solid var(--border-subtle); padding-left: 8px; margin-left: 4px; display:flex; align-items:center; gap:6px;">
+            <span style="font-size: 11px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase;">⚡ Auto:</span>
+            <button class="btn-action" id="btn-toggle-auto-withdraw" onclick="toggleAutoWithdrawConfig()" style="font-size: 10.5px; padding: 4px 8px; border-radius: 6px; font-weight: 700;">
+              ON ($0.10)
+            </button>
           </div>
         </div>
       </div>
@@ -1911,6 +1937,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       setInterval(fetchStats, 2000);
     }
 
+    // Live local second-by-second countdown decrement for smooth visual transitions
+    setInterval(() => {
+      if (!globalState || !globalState.accounts) return;
+      let hasUpdate = false;
+      globalState.accounts.forEach(acc => {
+        if (acc.status === 'SLEEPING' && acc.countdown_sleep > 0) {
+          acc.countdown_sleep -= 1;
+          hasUpdate = true;
+        }
+      });
+      if (hasUpdate && document.getElementById('accounts-grid')) {
+        renderAccounts(globalState.accounts);
+      }
+    }, 1000);
+
     /* AUTO RUN */
     initDashboard();
     window.addEventListener('load', initDashboard);
@@ -2020,6 +2061,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     /* WITHDRAWAL HUB RENDERING */
     function renderWithdrawalHub(data) {
+      // Update Auto-Withdraw Pill
+      const autoBtn = document.getElementById('btn-toggle-auto-withdraw');
+      if (autoBtn && data.auto_withdraw) {
+        const isAuto = data.auto_withdraw.enabled;
+        const autoThresh = data.auto_withdraw.threshold_usd || 0.10;
+        autoBtn.textContent = isAuto ? `⚡ ON ($${autoThresh.toFixed(2)})` : '⚡ OFF';
+        autoBtn.style.background = isAuto ? 'rgba(16, 185, 129, 0.2)' : 'rgba(255, 255, 255, 0.05)';
+        autoBtn.style.color = isAuto ? '#34D399' : 'var(--text-tertiary)';
+        autoBtn.style.border = isAuto ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid var(--border-subtle)';
+      }
+
       const accounts = data.accounts || [];
       const totalBalance = parseFloat(data.summary?.total_balance || 0);
       const target = selectedThreshold;
@@ -2443,7 +2495,26 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
     }
 
-    /* WALLET MODAL & ACTIONS */
+    async function toggleAutoWithdrawConfig() {
+      if (!globalState || !globalState.auto_withdraw) return;
+      const currentEnabled = globalState.auto_withdraw.enabled;
+      const newEnabled = !currentEnabled;
+      const threshold = selectedThreshold >= 0.10 ? selectedThreshold : 0.10;
+      
+      showToast(`Setting Auto-Withdraw to ${newEnabled ? 'ENABLED' : 'DISABLED'} (Threshold: $${threshold.toFixed(2)})...`);
+      try {
+        const res = await fetch('/api/actions/config_auto_withdraw', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: newEnabled, threshold_usd: threshold })
+        });
+        const result = await res.json();
+        showToast(result.message || 'Auto-Withdraw updated!');
+        fetchStats();
+      } catch (err) {
+        showToast(`Failed: ${err.message}`);
+      }
+    }
     function openWalletModal(email, currentWallet) {
       currentModalEmail = email;
       document.getElementById('modal-wallet-email').textContent = email;
@@ -2628,6 +2699,29 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, {"status": "ok", "message": "Bot service restart triggered successfully."})
             except Exception as e:
                 self._send_json(500, {"status": "error", "message": f"Failed to trigger retry: {e}"})
+
+        elif path == "/api/actions/config_auto_withdraw":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length).decode("utf-8")) if length > 0 else {}
+                
+                if not CONFIG_FILE.exists():
+                    self._send_json(500, {"status": "error", "message": "Config missing."})
+                    return
+
+                cfg = json.loads(CONFIG_FILE.read_text())
+                auto_cfg = cfg.setdefault("auto_withdraw", {})
+                if "enabled" in body:
+                    auto_cfg["enabled"] = bool(body["enabled"])
+                if "threshold_usd" in body:
+                    auto_cfg["threshold_usd"] = float(body["threshold_usd"])
+                if "service" not in auto_cfg:
+                    auto_cfg["service"] = "faucetpayusdt"
+
+                CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
+                self._send_json(200, {"status": "ok", "message": f"Auto-withdraw set to {'ON' if auto_cfg['enabled'] else 'OFF'} at ${auto_cfg['threshold_usd']:.2f} USD."})
+            except Exception as e:
+                self._send_json(500, {"status": "error", "message": f"Failed to update auto_withdraw config: {e}"})
 
         elif path == "/api/actions/save_wallet":
             try:
