@@ -371,6 +371,47 @@ class AccountWorker(threading.Thread):
         }
         return self._api("user/captcha/check/", data=payload)
 
+    def check_and_trigger_auto_withdraw(self, current_balance: float):
+        """Automatically trigger payout if auto_withdraw is enabled and threshold is reached."""
+        auto_cfg = self.global_config.get("auto_withdraw", {})
+        if not auto_cfg.get("enabled", False):
+            return
+
+        threshold = float(auto_cfg.get("threshold_usd", 0.10))
+        wallet = self.account_config.get("faucetpay_usdt_trc20", "").strip()
+
+        # Minimum LuckyWatch payout is $0.10 USD and wallet must be set
+        if not wallet or current_balance < threshold or current_balance < 0.10:
+            return
+
+        # Anti-spam: check last auto withdraw attempt time (at least 1 hour between attempts)
+        last_attempt = getattr(self, "_last_auto_withdraw_time", 0)
+        if time.time() - last_attempt < 3600:
+            return
+
+        self._last_auto_withdraw_time = time.time()
+        logger.info(f"⚡ [AUTO-WITHDRAW TRIGGERED] Balance (${current_balance:.5f} USD) >= Threshold (${threshold:.2f} USD). Initiating payout for {self.email} to {wallet} ...")
+
+        try:
+            payload = {
+                "sum": f"{current_balance:.5f}",
+                "service": "faucetpayusdt",
+                "captcha": ""
+            }
+            req = urllib.request.Request(
+                f"{self.base_url}/api/user/payout/send/",
+                data=urllib.parse.urlencode(payload).encode("utf-8"),
+                headers=self.headers
+            )
+            res = json.loads(self.opener.open(req, timeout=10).read().decode("utf-8"))
+            if res.get("status") == "ok":
+                logger.info(f"🎉 [AUTO-WITHDRAW SUCCESS] Payout submitted for {self.email}! Response: {res.get('data')}")
+            else:
+                msg = res.get("message", "unknown error")
+                logger.warning(f"⚠️ [AUTO-WITHDRAW NOTICE] Server response: {msg}")
+        except Exception as e:
+            logger.error(f"❌ [AUTO-WITHDRAW ERROR] Failed to send payout request: {e}")
+
     def claim_daily_bonus(self) -> Dict[str, Any]:
         """Claim daily login / streak bonus."""
         info = self._api("user/tasks/dailyBonus/", data={"method": "getInfo"})
@@ -435,10 +476,12 @@ class AccountWorker(threading.Thread):
                 except Exception as e:
                     logger.warning(f"Daily bonus check notice: {e}")
 
-            # Always fetch real user balance from server
+            # Always fetch real user balance from server and check auto-withdraw
             try:
                 u_curr = self.get_user_info().get("data", {})
+                bal_val = float(u_curr.get('balance', 0.0))
                 logger.info(f"💰 REAL BALANCE: ${u_curr.get('balance')} USD | Clovers: {u_curr.get('clover')}")
+                self.check_and_trigger_auto_withdraw(bal_val)
             except Exception:
                 pass
 
@@ -452,7 +495,9 @@ class AccountWorker(threading.Thread):
                     total_session_earned += 1
                     try:
                         u = self.get_user_info().get("data", {})
+                        bal_val = float(u.get('balance', 0.0))
                         logger.info(f"💰 REAL BALANCE: ${u.get('balance')} USD | Clovers: {u.get('clover')}")
+                        self.check_and_trigger_auto_withdraw(bal_val)
                     except Exception:
                         pass
                     time.sleep(delay)

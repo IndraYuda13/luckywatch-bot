@@ -31,5 +31,10 @@
     "base_url": "https://luckywatch.pro",
     "signin_url": "https://luckywatch.pro/signin",
     "watch_url": "https://luckywatch.pro/watch"
+  },
+  "auto_withdraw": {
+    "enabled": false,
+    "threshold_usd": 0.1,
+    "service": "faucetpayusdt"
   }
 }
