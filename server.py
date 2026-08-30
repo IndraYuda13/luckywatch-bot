@@ -25,30 +25,38 @@ STATE_FILE = Path("/root/projects/luckywatch-bot/state/sessions.json")
 def get_latest_stats() -> dict:
     balance = "0.0000000"
     clovers = "0"
-    email = "user@example.com"
-    proxy = "http://127.0.0.1:31001"
+    email = "Multiple Accounts"
+    proxy = "Multi-Node Setup"
+    accounts_info = []
 
     # Always fetch live real balance directly from server state
     if STATE_FILE.exists():
         try:
             state = json.loads(STATE_FILE.read_text())
-            sess = state.get("sessions", {}).get(email, {})
-            cookie_str = sess.get("cookie_string", "")
-            if cookie_str:
-                opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
-                req = urllib.request.Request(
-                    "https://luckywatch.pro/api/user/",
-                    data=urllib.parse.urlencode({"method": "getCurrentUser"}).encode("utf-8"),
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36",
-                        "Cookie": cookie_str,
-                        "Content-Type": "application/x-www-form-urlencoded",
-                    },
-                )
-                res = json.loads(opener.open(req, timeout=5).read())
-                if res.get("status") == "ok" and "balance" in res.get("data", {}):
-                    balance = str(res["data"]["balance"])
-                    clovers = str(res["data"]["clover"])
+            sessions = state.get("sessions", {})
+            for acc_email, sess in sessions.items():
+                cookie_str = sess.get("cookie_string", "")
+                if cookie_str:
+                    try:
+                        opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": "http://127.0.0.1:31001", "https": "http://127.0.0.1:31001"}))
+                        req = urllib.request.Request(
+                            "https://luckywatch.pro/api/user/",
+                            data=urllib.parse.urlencode({"method": "getCurrentUser"}).encode("utf-8"),
+                            headers={
+                                "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36",
+                                "Cookie": cookie_str,
+                                "Content-Type": "application/x-www-form-urlencoded",
+                            },
+                        )
+                        res = json.loads(opener.open(req, timeout=5).read())
+                        if res.get("status") == "ok" and "balance" in res.get("data", {}):
+                            accounts_info.append({
+                                "email": acc_email,
+                                "balance": str(res["data"]["balance"]),
+                                "clovers": str(res["data"]["clover"])
+                            })
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -61,13 +69,18 @@ def get_latest_stats() -> dict:
         except Exception:
             pass
 
+    # Calculate total balance
+    total_bal = sum([float(a["balance"]) for a in accounts_info]) if accounts_info else 0.0
+    total_clv = sum([int(a["clovers"]) for a in accounts_info]) if accounts_info else 0
+
     return {
-        "email": email,
-        "balance": balance,
-        "clovers": clovers,
-        "proxy": proxy,
+        "email": f"{len(accounts_info)} Active Account(s)" if accounts_info else "Multi-Worker",
+        "balance": f"{total_bal:.7f}",
+        "clovers": str(total_clv),
+        "accounts": accounts_info,
+        "proxy": "Node 01 (ID) + Node 02 (SG)",
         "logs": log_lines,
-        "service_status": "RUNNING 24/7",
+        "service_status": "RUNNING 24/7 (MULTI-THREAD)",
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
 
