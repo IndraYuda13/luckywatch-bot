@@ -2217,8 +2217,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         showToast('Please configure FaucetPay USDT TRC20 address first');
         return;
       }
-      const confirmMsg = `Confirm withdrawal of $${acc.balance} USD for ${acc.email_redacted} to FaucetPay address ${acc.faucetpay_usdt_trc20.slice(0,6)}...${acc.faucetpay_usdt_trc20.slice(-4)}?`;
-      if (!confirm(confirmMsg)) return;
+      
+      showToast(`Initiating payout request for ${acc.email_redacted}...`);
 
       try {
         const res = await fetch('/api/actions/withdraw', {
@@ -2227,7 +2227,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           body: JSON.stringify({ email: email })
         });
         const result = await res.json();
-        showToast(result.message || 'Withdrawal triggered');
+        showToast(result.message || 'Withdrawal request sent');
         fetchStats();
       } catch (err) {
         showToast(`Withdrawal error: ${err.message}`);
@@ -2240,7 +2240,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         showToast('No accounts currently meet the threshold with configured wallet');
         return;
       }
-      if (!confirm(`Trigger auto-withdrawal for ${readyAccounts.length} ready account(s)?`)) return;
+      
+      showToast(`Sending batch withdrawal request for ${readyAccounts.length} account(s)...`);
 
       try {
         const res = await fetch('/api/actions/withdraw_all', {
@@ -2249,7 +2250,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           body: JSON.stringify({ threshold: selectedThreshold })
         });
         const result = await res.json();
-        showToast(result.message || 'Batch withdrawal completed');
+        showToast(result.message || 'Batch withdrawal request processed');
         fetchStats();
       } catch (err) {
         showToast(`Batch withdrawal error: ${err.message}`);
