@@ -657,7 +657,6 @@ class AccountWorker(threading.Thread):
             pass
 
         logger.info(f"Worker started for {self.email} (Dynamic 24/7 Autopilot) ...")
-        self.update_fleet_state(status="ACTIVE", countdown_sleep=0)
 
         cycle_count = 0
         total_session_earned = 0
@@ -729,8 +728,12 @@ class AccountWorker(threading.Thread):
             msg = task_res.get("message", "No task returned")
             logger.warning(f"No task available: {msg}")
             if "limitInHour" in msg:
+                sleep_hr = self.seconds_until_next_hour()
+                self.update_fleet_state(status="SLEEPING", countdown_sleep=sleep_hr)
                 return {"status": "limit_hour"}
             elif "limitInDay" in msg:
+                sleep_day = self.seconds_until_next_day()
+                self.update_fleet_state(status="SLEEPING", countdown_sleep=sleep_day)
                 return {"status": "limit_day"}
             return {"status": "empty", "message": msg}
 

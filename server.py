@@ -399,6 +399,7 @@ def get_latest_stats() -> dict:
         fleet_st = fleet_states_map.get(email, {})
         log_st = acc_live_states.get(acc_prefix, {})
 
+        # If fleet state explicitly reports SLEEPING / ACTIVE / ERROR, trust fleet_st first
         live_status = fleet_st.get("status") or log_st.get("status") or ("IDLE" if is_active_cfg else "DISABLED")
         live_task = fleet_st.get("current_task") or log_st.get("current_task")
         live_error = fleet_st.get("error_reason") or log_st.get("error_reason")
@@ -410,6 +411,7 @@ def get_latest_stats() -> dict:
         live_sleep_cd = 0
         if fleet_st.get("sleep_until_ts", 0) > now_ts:
             live_sleep_cd = int(fleet_st["sleep_until_ts"] - now_ts)
+            live_status = "SLEEPING"
         elif log_st.get("countdown_sleep", 0) > 0:
             live_sleep_cd = int(log_st["countdown_sleep"])
 
