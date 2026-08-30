@@ -141,22 +141,45 @@ class AccountWorker(threading.Thread):
         self.cookie_string = ""
         return False
 
-    def solve_turnstile(self, sitekey: str, action: str = "login", timeout_s: int = 40) -> str:
-        """Call internal Turnstile Solver API to obtain Cloudflare challenge token."""
+    def get_login_proxy_pool(self) -> List[str]:
+        """Collect all available proxy URLs from configuration (node-01 to node-15) for login failover."""
+        proxies = []
+        # First priority: dedicated proxy assigned to this account
+        if self.proxy_url:
+            proxies.append(self.proxy_url)
+
+        # Other proxies from active accounts in config
+        for a in self.global_config.get("accounts", []):
+            p = a.get("proxy")
+            if p and p not in proxies:
+                proxies.append(p)
+
+        # All 15 local proxy nodes pool (ports 31001 to 31015)
+        for port in range(31001, 31016):
+            p_url = f"http://127.0.0.1:{port}"
+            if p_url not in proxies:
+                proxies.append(p_url)
+
+        return proxies
+
+    def solve_turnstile(self, sitekey: str, action: str = "login", timeout_s: int = 40, proxy_url_override: Optional[str] = None) -> str:
+        """Call internal Turnstile Solver API to obtain Cloudflare challenge token with proxy override support."""
         solver_cfg = self.global_config.get("turnstile", {})
         solver_api = solver_cfg.get("solver_url", "http://127.0.0.1:5072")
         signin_url = self.global_config.get("app", {}).get("signin_url", f"{self.base_url}/signin")
+
+        target_proxy = proxy_url_override or self.proxy_url
 
         qs = urllib.parse.urlencode({
             "url": signin_url,
             "sitekey": sitekey,
             "action": action,
         })
-        if self.proxy_url:
-            qs += f"&proxy={urllib.parse.quote(self.proxy_url)}"
+        if target_proxy:
+            qs += f"&proxy={urllib.parse.quote(target_proxy)}"
 
         create_task_url = f"{solver_api}/turnstile?{qs}"
-        logger.info(f"Requesting Turnstile token from solver: {create_task_url} ...")
+        logger.info(f"Requesting Turnstile token from solver (via {target_proxy or 'direct'}): {create_task_url} ...")
 
         with urllib.request.urlopen(create_task_url, timeout=10) as res:
             task = json.loads(res.read())
@@ -239,8 +262,8 @@ class AccountWorker(threading.Thread):
         except Exception:
             pass
 
-    def login(self, max_retries: int = 5, force_refresh: bool = False) -> Dict[str, Any]:
-        """Perform full authentication flow with automatic retry loop."""
+    def login(self, max_retries: int = 5, force_refresh: bool = False, attempt_offset: int = 0) -> Dict[str, Any]:
+        """Perform authentication flow with progressive proxy node rotation."""
         if not force_refresh and self.load_saved_session():
             return {"status": "success", "source": "saved_session", "user": self.get_user_info().get("data")}
 
@@ -248,13 +271,22 @@ class AccountWorker(threading.Thread):
         sitekey = turnstile_cfg.get("sitekey", "0x4AAAAAABqiRMe3mbyG5xKO")
         timeout_s = turnstile_cfg.get("timeout_seconds", 40)
 
-        for attempt in range(1, max_retries + 1):
-            logger.info(f"🔑 Authentication attempt {attempt}/{max_retries} for {self.email} ...")
+        proxy_pool = self.get_login_proxy_pool()
+
+        for i in range(max_retries):
+            attempt = i + 1
+            # Progressive rotation across node 01 to node 15
+            proxy_idx = (attempt_offset + i) % len(proxy_pool)
+            current_login_proxy = proxy_pool[proxy_idx]
+
+            logger.info(f"🔑 Authentication attempt {attempt}/{max_retries} for {self.email} [Login Proxy: {current_login_proxy}] ...")
             try:
-                token = self.solve_turnstile(sitekey=sitekey, timeout_s=timeout_s)
+                token = self.solve_turnstile(sitekey=sitekey, timeout_s=timeout_s, proxy_url_override=current_login_proxy)
                 logger.info(f"Submitting mailAuth for {self.email} ...")
                 
-                # Use raw urllib opener to capture Set-Cookie headers
+                # Build temporary opener with the login proxy
+                login_opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": current_login_proxy, "https": current_login_proxy}))
+
                 payload = {
                     "method": "mailAuth",
                     "email": self.email,
@@ -274,7 +306,7 @@ class AccountWorker(threading.Thread):
                     method="POST",
                 )
                 
-                with self._opener.open(req, timeout=15) as res:
+                with login_opener.open(req, timeout=15) as res:
                     set_cookie_headers = res.headers.get_all("Set-Cookie", [])
                     raw_res = res.read().decode("utf-8", errors="ignore")
                     res_data = json.loads(raw_res)
@@ -309,10 +341,10 @@ class AccountWorker(threading.Thread):
                     logger.warning(f"Server rejected login ({res_data.get('message')}). Retrying in 5s ...")
 
             except Exception as e:
-                logger.warning(f"Login attempt {attempt} failed ({e}). Retrying in {attempt * 3}s...")
+                logger.warning(f"Login attempt {attempt} failed via {current_login_proxy} ({e}). Retrying in {attempt * 3}s...")
                 time.sleep(attempt * 3)
 
-        raise RuntimeError(f"Failed to authenticate {self.email} after {max_retries} attempts")
+        raise RuntimeError(f"Failed to authenticate {self.email} after {max_retries} attempts (Proxy batch offset: {attempt_offset})")
 
     def get_user_info(self) -> Dict[str, Any]:
         """Fetch current user profile and balance."""
@@ -485,12 +517,22 @@ class AccountWorker(threading.Thread):
             time.sleep(1)
 
     def run(self):
-        """Worker thread main execution loop (Fully Dynamic 24/7 Stream Engine)."""
+        """Worker thread main execution loop (Fully Dynamic 24/7 Stream Engine with Continuous Login Retry)."""
         self.check_proxy()
-        try:
-            self.login(max_retries=5)
-        except Exception as e:
-            logger.error(f"Login failed for {self.email}: {e}")
+
+        # Continuous login loop with 5 attempts per batch, then 5m cooldown & rotating proxy nodes
+        login_batch = 0
+        while not self.stop_event.is_set():
+            try:
+                attempt_offset = login_batch * 5
+                self.login(max_retries=5, attempt_offset=attempt_offset)
+                break
+            except Exception as e:
+                login_batch += 1
+                logger.error(f"Login batch #{login_batch} failed for {self.email}: {e}. Entering 5-minute cooldown before next rotating attempt (batch #{login_batch+1}) ...")
+                self.adaptive_sleep(300, reason="login_retry_cooldown")
+
+        if self.stop_event.is_set():
             return
 
         runner_cfg = self.global_config.get("runner", {})
