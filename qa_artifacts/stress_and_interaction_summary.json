@@ -1,0 +1,79 @@
+{
+  "toasts": [
+    {
+      "success": {
+        "visible": true,
+        "color": "rgb(255, 255, 255)",
+        "borderColor": "rgba(16, 185, 129, 0.6)"
+      }
+    },
+    {
+      "error": {
+        "visible": true,
+        "color": "rgb(255, 255, 255)",
+        "borderColor": "rgba(244, 63, 94, 0.6)"
+      }
+    },
+    {
+      "warning": {
+        "visible": true,
+        "color": "rgb(255, 255, 255)",
+        "borderColor": "rgba(245, 158, 11, 0.6)"
+      }
+    },
+    {
+      "info": {
+        "visible": true,
+        "color": "rgb(255, 255, 255)",
+        "borderColor": "rgba(56, 189, 248, 0.6)"
+      }
+    }
+  ],
+  "fifo_dom_nodes_after_500_inputs": 200,
+  "fifo_first_node": "[2026-08-31 12:15:301] Stress item #301 - Live throughput test",
+  "fifo_last_node": "[2026-08-31 12:15:500] Stress item #500 - Live throughput test",
+  "filters": {
+    "success_only": 1,
+    "error_only": 1,
+    "all": 4
+  },
+  "viewports": [
+    {
+      "viewport": "mobile_360x740",
+      "width": 360,
+      "height": 740,
+      "horizontal_overflow": false
+    },
+    {
+      "viewport": "mobile_390x844",
+      "width": 390,
+      "height": 844,
+      "horizontal_overflow": false
+    },
+    {
+      "viewport": "tablet_768x1024",
+      "width": 768,
+      "height": 1024,
+      "horizontal_overflow": false
+    },
+    {
+      "viewport": "laptop_1280x800",
+      "width": 1280,
+      "height": 800,
+      "horizontal_overflow": false
+    },
+    {
+      "viewport": "desktop_1440x900",
+      "width": 1440,
+      "height": 900,
+      "horizontal_overflow": false
+    },
+    {
+      "viewport": "ultrawide_1920x1080",
+      "width": 1920,
+      "height": 1080,
+      "horizontal_overflow": false
+    }
+  ],
+  "console_errors_count": 0
+}

@@ -1702,21 +1702,22 @@
     function getPayoutBadge(lastPayout) {
       if (!lastPayout) {
         return {
-          label: 'NO PAYOUT',
+          label: 'No payout history yet',
           color: 'var(--text-tertiary)',
           bg: 'rgba(255, 255, 255, 0.03)',
           border: 'rgba(255, 255, 255, 0.08)',
-          icon: '•'
+          icon: '•',
+          isEmpty: true
         };
       }
 
-      const code = String(lastPayout.status_code || '');
+      const code = String(lastPayout.status_code !== undefined && lastPayout.status_code !== null ? lastPayout.status_code : (lastPayout.status || ''));
       const status = String(lastPayout.status || '').toUpperCase();
 
       if (code === '1' || status === 'PAID') {
         return {
           label: 'PAID',
-          color: 'var(--emerald-bright)',
+          color: '#34D399',
           bg: 'rgba(16, 185, 129, 0.12)',
           border: 'rgba(16, 185, 129, 0.35)',
           icon: '✓'
@@ -1725,25 +1726,25 @@
       if (code === '2' || status === 'IN PROGRESS') {
         return {
           label: 'IN PROGRESS',
-          color: 'var(--cyan)',
-          bg: 'rgba(56, 189, 248, 0.12)',
-          border: 'rgba(56, 189, 248, 0.35)',
-          icon: '⏳'
+          color: '#38BDF8',
+          bg: 'rgba(6, 182, 212, 0.12)',
+          border: 'rgba(6, 182, 212, 0.35)',
+          icon: '⚡'
         };
       }
       if (code === '3' || status === 'UNDER REVIEW') {
         return {
           label: 'UNDER REVIEW',
-          color: 'var(--amber-bright)',
-          bg: 'rgba(245, 158, 11, 0.12)',
-          border: 'rgba(245, 158, 11, 0.35)',
-          icon: '🔍'
+          color: '#FDE047',
+          bg: 'rgba(245, 158, 11, 0.15)',
+          border: 'rgba(245, 158, 11, 0.50)',
+          icon: '⏳'
         };
       }
       if (code === '0' || status === 'PAYMENT ERROR') {
         return {
           label: 'PAYMENT ERROR',
-          color: 'var(--rose-bright)',
+          color: '#FB7185',
           bg: 'rgba(244, 63, 94, 0.12)',
           border: 'rgba(244, 63, 94, 0.35)',
           icon: '⚠️'
@@ -1983,25 +1984,32 @@
             </div>
 
             ${(() => {
-              if (!acc.last_payout) return '';
+              if (!acc.last_payout) {
+                return `
+                  <div class="payout-card-strip" style="background: rgba(255, 255, 255, 0.02); border: 1px dashed var(--border-subtle); border-radius: var(--radius-sm); padding: 7px 10px; display: flex; align-items: center; justify-content: center; font-size: 11px; margin-top: 4px; color: var(--text-tertiary);">
+                    <span>No payout history yet</span>
+                  </div>
+                `;
+              }
               const pStyle = getPayoutBadge(acc.last_payout);
-              const pId = acc.last_payout.id ? `#${acc.last_payout.id}` : '';
-              const pTime = acc.last_payout.timestamp || '';
-              const pNet = acc.last_payout.net_amount ? ` (Net: $${acc.last_payout.net_amount})` : '';
-              const tooltip = `Payout ${pId} | Status: ${pStyle.label} | Wallet: ${acc.last_payout.wallet || '-'}${pNet}`;
+              const pId = acc.last_payout.id ? `#${escapeHtml(String(acc.last_payout.id))}` : '';
+              const pTime = escapeHtml(String(acc.last_payout.timestamp || ''));
+              const pAmount = escapeHtml(String(acc.last_payout.amount || '0.00000'));
+              const pNet = acc.last_payout.net_amount ? ` (Net: $${escapeHtml(String(acc.last_payout.net_amount))})` : '';
+              const tooltip = escapeHtml(`Payout ${pId} | Status: ${pStyle.label} | Wallet: ${acc.last_payout.wallet || '-'}${pNet}`);
 
               return `
                 <div class="payout-card-strip" style="background: ${pStyle.bg}; border: 1px solid ${pStyle.border}; border-radius: var(--radius-sm); padding: 7px 10px; display: flex; justify-content: space-between; align-items: center; font-size: 11px; margin-top: 4px;" title="${tooltip}">
                   <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
-                    <span>${pStyle.icon}</span>
-                    <span class="mono tabular" style="font-weight: 700; color: ${pStyle.color};">$${acc.last_payout.amount} USD</span>
-                    <span class="status-badge-chip" style="background: ${pStyle.bg}; border: 1px solid ${pStyle.border}; color: ${pStyle.color}; padding: 1px 6px; font-size: 9.5px; border-radius: var(--radius-full); text-transform: uppercase;">
-                      ${pStyle.label}
+                    ${pId ? `<span class="mono" style="font-weight: 700; color: var(--text-secondary); font-size: 11px;">${pId}</span>` : ''}
+                    <span class="status-badge-chip" style="background: ${pStyle.bg}; border: 1px solid ${pStyle.border}; color: ${pStyle.color}; padding: 1px 6px; font-size: 9.5px; border-radius: var(--radius-full); text-transform: uppercase; display: inline-flex; align-items: center; gap: 3px;">
+                      <span>${pStyle.icon}</span>
+                      <span>${pStyle.label}</span>
                     </span>
                   </div>
-                  <div style="display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--text-tertiary);" class="mono">
-                    ${pId ? `<span>${pId}</span><span>•</span>` : ''}
-                    <span>${pTime.split(' ')[1] || pTime}</span>
+                  <div style="display: flex; align-items: center; gap: 6px; font-size: 10.5px;" class="mono">
+                    <span class="tabular" style="font-weight: 700; color: ${pStyle.color}; font-size: 11.5px;">$${pAmount} USD</span>
+                    ${pTime ? `<span style="color: var(--text-tertiary); font-size: 10px;">• ${pTime.split(' ')[1] || pTime}</span>` : ''}
                   </div>
                 </div>
               `;
@@ -2082,24 +2090,28 @@
             <td>
               ${(() => {
                 if (!acc.last_payout) {
-                  return `<span style="color: var(--text-tertiary); font-size: 11px;">-</span>`;
+                  return `<span style="color: var(--text-tertiary); font-size: 11px; font-style: italic;">No payout history yet</span>`;
                 }
                 const pStyle = getPayoutBadge(acc.last_payout);
-                const pId = acc.last_payout.id ? `#${acc.last_payout.id}` : '';
-                const pTime = acc.last_payout.timestamp || '';
-                const tooltip = `ID: ${pId} | Wallet: ${acc.last_payout.wallet || '-'} | Time: ${pTime}`;
+                const pId = acc.last_payout.id ? `#${escapeHtml(String(acc.last_payout.id))}` : '';
+                const pTime = escapeHtml(String(acc.last_payout.timestamp || ''));
+                const pAmount = escapeHtml(String(acc.last_payout.amount || '0.00000'));
+                const pNet = acc.last_payout.net_amount ? ` (Net: $${escapeHtml(String(acc.last_payout.net_amount))})` : '';
+                const tooltip = escapeHtml(`Payout ${pId} | Status: ${pStyle.label} | Wallet: ${acc.last_payout.wallet || '-'}${pNet} | Time: ${pTime}`);
 
                 return `
-                  <div style="display: flex; flex-direction: column; gap: 2px;" title="${tooltip}">
-                    <div style="display: flex; align-items: center; gap: 5px;">
-                      <span class="mono tabular" style="font-weight: 700; color: ${pStyle.color}; font-size: 11.5px;">$${acc.last_payout.amount}</span>
-                      <span style="background: ${pStyle.bg}; border: 1px solid ${pStyle.border}; color: ${pStyle.color}; padding: 1px 5px; font-size: 9px; font-weight: 700; border-radius: 4px; text-transform: uppercase;">
-                        ${pStyle.label}
+                  <div style="display: flex; flex-direction: column; gap: 3px; min-width: 130px;" title="${tooltip}">
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                      <span class="status-badge-chip" style="background: ${pStyle.bg}; border: 1px solid ${pStyle.border}; color: ${pStyle.color}; padding: 1px 6px; font-size: 9.5px; font-weight: 700; border-radius: 4px; text-transform: uppercase; display: inline-flex; align-items: center; gap: 3px;">
+                        <span>${pStyle.icon}</span>
+                        <span>${pStyle.label}</span>
                       </span>
+                      <span class="mono tabular" style="font-weight: 700; color: ${pStyle.color}; font-size: 11.5px;">$${pAmount}</span>
                     </div>
-                    <span class="mono" style="font-size: 9.5px; color: var(--text-tertiary);">
-                      ${pId} • ${pTime.split(' ')[1] || pTime}
-                    </span>
+                    <div class="mono" style="font-size: 10px; color: var(--text-tertiary); display: flex; align-items: center; gap: 4px;">
+                      ${pId ? `<span style="color: var(--text-secondary); font-weight: 600;">${pId}</span><span>•</span>` : ''}
+                      <span>${pTime.split(' ')[1] || pTime}</span>
+                    </div>
                   </div>
                 `;
               })()}

@@ -1,0 +1,536 @@
+{
+  "desktop_status": 200,
+  "favicon_href": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%2310B981'%3E%3Cpath d='M12 3a3 3 0 0 0-3 3c0 1.1.6 2.1 1.5 2.6C9.6 9 8.6 8.5 7.5 8.5a3.5 3.5 0 0 0-3.5 3.5 3.5 3.5 0 0 0 3.5 3.5c1.1 0 2.1-.5 2.6-1.4-.4.9-.6 1.9-.6 3 0 1.9 1.6 3.5 3.5 3.5s3.5-1.6 3.5-3.5c0-1.1-.2-2.1-.6-3 .5.9 1.5 1.4 2.6 1.4a3.5 3.5 0 0 0 3.5-3.5 3.5 3.5 0 0 0-3.5-3.5c-1.1 0-2.1.5-2.6 1.4.9-.5 1.5-1.5 1.5-2.6a3 3 0 0 0-3-3z'/%3E%3C/svg%3E",
+  "toasts": [
+    {
+      "type": "success",
+      "data": {
+        "exists": true,
+        "type": "success",
+        "role": "alert",
+        "color": "rgb(255, 255, 255)",
+        "backgroundColor": "rgba(15, 23, 42, 0.95)",
+        "borderColor": "rgba(16, 185, 129, 0.6)",
+        "hasIcon": true
+      }
+    },
+    {
+      "type": "error",
+      "data": {
+        "exists": true,
+        "type": "error",
+        "role": "alert",
+        "color": "rgb(255, 255, 255)",
+        "backgroundColor": "rgba(15, 23, 42, 0.95)",
+        "borderColor": "rgba(244, 63, 94, 0.6)",
+        "hasIcon": true
+      }
+    },
+    {
+      "type": "warning",
+      "data": {
+        "exists": true,
+        "type": "warning",
+        "role": "alert",
+        "color": "rgb(255, 255, 255)",
+        "backgroundColor": "rgba(15, 23, 42, 0.95)",
+        "borderColor": "rgba(245, 158, 11, 0.6)",
+        "hasIcon": true
+      }
+    },
+    {
+      "type": "info",
+      "data": {
+        "exists": true,
+        "type": "info",
+        "role": "alert",
+        "color": "rgb(255, 255, 255)",
+        "backgroundColor": "rgba(15, 23, 42, 0.95)",
+        "borderColor": "rgba(56, 189, 248, 0.6)",
+        "hasIcon": true
+      }
+    }
+  ],
+  "fifo_logs": {
+    "dom_node_count": 200,
+    "first_line_text": "[2026-08-31 12:00:151] [INFO] Synthetic test log stream event #151",
+    "last_line_text": "[2026-08-31 12:00:350] [INFO] Synthetic test log stream event #350",
+    "contain_property": "content"
+  },
+  "mobile_touch_targets_count": 47,
+  "mobile_touch_targets": [
+    {
+      "index": 0,
+      "tag": "button",
+      "id": "",
+      "classes": "btn-action",
+      "text": "Restart Daemon",
+      "width": 142,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 1,
+      "tag": "button",
+      "id": "",
+      "classes": "btn-action",
+      "text": "Force Cache Purge",
+      "width": 159.4,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 2,
+      "tag": "button",
+      "id": "pill-010",
+      "classes": "preset-pill active",
+      "text": "$0.10",
+      "width": 60,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 3,
+      "tag": "button",
+      "id": "pill-050",
+      "classes": "preset-pill",
+      "text": "$0.50",
+      "width": 58,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 4,
+      "tag": "button",
+      "id": "pill-100",
+      "classes": "preset-pill",
+      "text": "$1.00",
+      "width": 58,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 5,
+      "tag": "button",
+      "id": "pill-500",
+      "classes": "preset-pill",
+      "text": "$5.00",
+      "width": 58,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 6,
+      "tag": "input",
+      "id": "custom-threshold-input",
+      "classes": "custom-threshold-input",
+      "text": "custom-threshold-input",
+      "width": 58,
+      "height": 36,
+      "meetsErgonomic44": false
+    },
+    {
+      "index": 7,
+      "tag": "button",
+      "id": "btn-toggle-auto-withdraw",
+      "classes": "btn-action",
+      "text": "\u26a1 ON ($0.10)",
+      "width": 85.9,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 8,
+      "tag": "button",
+      "id": "btn-withdraw-all",
+      "classes": "btn-action",
+      "text": "\u26a1 Auto Withdraw All Ready",
+      "width": 188,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 9,
+      "tag": "button",
+      "id": "",
+      "classes": "filter-tab-btn active",
+      "text": "All Accounts (\n5\n)",
+      "width": 120.9,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 10,
+      "tag": "button",
+      "id": "",
+      "classes": "filter-tab-btn",
+      "text": "Active \ud83d\udfe2 (\n4\n)",
+      "width": 102.4,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 11,
+      "tag": "button",
+      "id": "",
+      "classes": "filter-tab-btn",
+      "text": "Sleeping \ud83d\udfe1 (\n1\n)",
+      "width": 116.4,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 12,
+      "tag": "button",
+      "id": "",
+      "classes": "filter-tab-btn",
+      "text": "Ready to Withdraw \ud83c\udfc6 (\n1\n)",
+      "width": 174.3,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 13,
+      "tag": "button",
+      "id": "",
+      "classes": "filter-tab-btn",
+      "text": "Error \ud83d\udd34 (\n0\n)",
+      "width": 95.7,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 14,
+      "tag": "input",
+      "id": "acc-search-input",
+      "classes": "",
+      "text": "acc-search-input",
+      "width": 201.2,
+      "height": 14,
+      "meetsErgonomic44": false
+    },
+    {
+      "index": 15,
+      "tag": "button",
+      "id": "view-btn-grid",
+      "classes": "view-btn active",
+      "text": "Card Grid View",
+      "width": 44,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 16,
+      "tag": "button",
+      "id": "view-btn-matrix",
+      "classes": "view-btn",
+      "text": "Dense Ledger Matrix",
+      "width": 44,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 17,
+      "tag": "button",
+      "id": "",
+      "classes": "copy-btn",
+      "text": "Copy Full Email",
+      "width": 44,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 18,
+      "tag": "button",
+      "id": "",
+      "classes": "btn-action",
+      "text": "\u2699\ufe0f",
+      "width": 44,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 19,
+      "tag": "button",
+      "id": "",
+      "classes": "btn-action ",
+      "text": "\ud83d\udcb8 Payout",
+      "width": 68.9,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 20,
+      "tag": "button",
+      "id": "",
+      "classes": "btn-action",
+      "text": "Logs",
+      "width": 44,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 21,
+      "tag": "button",
+      "id": "",
+      "classes": "copy-btn",
+      "text": "Copy Full Email",
+      "width": 44,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 22,
+      "tag": "button",
+      "id": "",
+      "classes": "btn-action",
+      "text": "\u2699\ufe0f",
+      "width": 44,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 23,
+      "tag": "button",
+      "id": "",
+      "classes": "btn-action ",
+      "text": "\ud83d\udcb8 Payout",
+      "width": 68.9,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 24,
+      "tag": "button",
+      "id": "",
+      "classes": "btn-action",
+      "text": "Logs",
+      "width": 44,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 25,
+      "tag": "button",
+      "id": "",
+      "classes": "copy-btn",
+      "text": "Copy Full Email",
+      "width": 44,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 26,
+      "tag": "button",
+      "id": "",
+      "classes": "btn-action",
+      "text": "\u2699\ufe0f",
+      "width": 44,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 27,
+      "tag": "button",
+      "id": "",
+      "classes": "btn-action ",
+      "text": "\ud83d\udcb8 Payout",
+      "width": 68.9,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 28,
+      "tag": "button",
+      "id": "",
+      "classes": "btn-action",
+      "text": "Logs",
+      "width": 44,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 29,
+      "tag": "button",
+      "id": "",
+      "classes": "copy-btn",
+      "text": "Copy Full Email",
+      "width": 44,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 30,
+      "tag": "button",
+      "id": "",
+      "classes": "btn-action",
+      "text": "\u2699\ufe0f",
+      "width": 44,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 31,
+      "tag": "button",
+      "id": "",
+      "classes": "btn-action gold-tier",
+      "text": "\ud83d\udcb8 Payout",
+      "width": 68.9,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 32,
+      "tag": "button",
+      "id": "",
+      "classes": "btn-action",
+      "text": "Logs",
+      "width": 44,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 33,
+      "tag": "button",
+      "id": "",
+      "classes": "copy-btn",
+      "text": "Copy Full Email",
+      "width": 44,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 34,
+      "tag": "button",
+      "id": "",
+      "classes": "btn-action",
+      "text": "\u2699\ufe0f",
+      "width": 44,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 35,
+      "tag": "button",
+      "id": "",
+      "classes": "btn-action ",
+      "text": "\ud83d\udcb8 Payout",
+      "width": 68.9,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 36,
+      "tag": "button",
+      "id": "",
+      "classes": "btn-action",
+      "text": "Logs",
+      "width": 44,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 37,
+      "tag": "button",
+      "id": "",
+      "classes": "t-tab-btn active",
+      "text": "\u26a1 ALL FLEET LOGS",
+      "width": 150,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 38,
+      "tag": "button",
+      "id": "",
+      "classes": "t-tab-btn ",
+      "text": "\ud83d\udc64 lvtsundere",
+      "width": 122,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 39,
+      "tag": "button",
+      "id": "",
+      "classes": "t-tab-btn ",
+      "text": "\ud83d\udc64 holiskabe",
+      "width": 115,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 40,
+      "tag": "button",
+      "id": "",
+      "classes": "t-tab-btn ",
+      "text": "\ud83d\udc64 sebotin147",
+      "width": 122,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 41,
+      "tag": "button",
+      "id": "",
+      "classes": "t-tab-btn ",
+      "text": "\ud83d\udc64 ehas86499",
+      "width": 115,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 42,
+      "tag": "button",
+      "id": "",
+      "classes": "t-tab-btn ",
+      "text": "\ud83d\udc64 halolakapa13",
+      "width": 136,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 43,
+      "tag": "select",
+      "id": "log-level-filter",
+      "classes": "log-level-select",
+      "text": "ALL LEVELS\nSUCCESS ONLY\nWARNIN",
+      "width": 130,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 44,
+      "tag": "button",
+      "id": "btn-autoscroll",
+      "classes": "btn-action",
+      "text": "\ud83d\udd12 Auto-Scroll: ON",
+      "width": 117.2,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 45,
+      "tag": "button",
+      "id": "",
+      "classes": "btn-action",
+      "text": "\ud83e\uddf9 Clear",
+      "width": 62.6,
+      "height": 44,
+      "meetsErgonomic44": true
+    },
+    {
+      "index": 46,
+      "tag": "button",
+      "id": "",
+      "classes": "btn-action",
+      "text": "\ud83d\udcbe Export",
+      "width": 69.9,
+      "height": 44,
+      "meetsErgonomic44": true
+    }
+  ],
+  "console_messages": [],
+  "page_errors": [],
+  "failed_requests": []
+}

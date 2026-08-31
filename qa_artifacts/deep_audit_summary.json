@@ -1,0 +1,90 @@
+{
+  "wcag_total_elements_audited": 148,
+  "wcag_passed_elements": 124,
+  "wcag_sample": [
+    {
+      "tag": "h1",
+      "text": "LuckyWatch Fleet Telemetr",
+      "fg": "rgb(255, 255, 255)",
+      "bg": "rgb(15,23,42)",
+      "ratio": 17.85,
+      "wcag_aa_pass": true
+    },
+    {
+      "tag": "button",
+      "text": "Restart Daemon",
+      "fg": "rgb(255, 255, 255)",
+      "bg": "rgb(255,255,255)",
+      "ratio": 1,
+      "wcag_aa_pass": false
+    },
+    {
+      "tag": "button",
+      "text": "Force Cache Purge",
+      "fg": "rgb(255, 255, 255)",
+      "bg": "rgb(255,255,255)",
+      "ratio": 1,
+      "wcag_aa_pass": false
+    },
+    {
+      "tag": "h2",
+      "text": "Withdrawal Readiness Hub",
+      "fg": "rgb(255, 255, 255)",
+      "bg": "rgb(7,9,14)",
+      "ratio": 19.92,
+      "wcag_aa_pass": true
+    },
+    {
+      "tag": "button",
+      "text": "\u26a1 ON ($0.10)",
+      "fg": "rgb(52, 211, 153)",
+      "bg": "rgb(16,185,129)",
+      "ratio": 1.32,
+      "wcag_aa_pass": false
+    },
+    {
+      "tag": "button",
+      "text": "\u26a1 Auto Withdraw All Ready",
+      "fg": "rgb(0, 0, 0)",
+      "bg": "rgb(0,0,0)",
+      "ratio": 1,
+      "wcag_aa_pass": false
+    },
+    {
+      "tag": "button",
+      "text": "\u2699\ufe0f",
+      "fg": "rgb(255, 255, 255)",
+      "bg": "rgb(255,255,255)",
+      "ratio": 1,
+      "wcag_aa_pass": false
+    },
+    {
+      "tag": "button",
+      "text": "\ud83d\udcb8 Payout",
+      "fg": "rgb(255, 255, 255)",
+      "bg": "rgb(255,255,255)",
+      "ratio": 1,
+      "wcag_aa_pass": false
+    },
+    {
+      "tag": "button",
+      "text": "Logs",
+      "fg": "rgb(255, 255, 255)",
+      "bg": "rgb(255,255,255)",
+      "ratio": 1,
+      "wcag_aa_pass": false
+    },
+    {
+      "tag": "button",
+      "text": "\u2699\ufe0f",
+      "fg": "rgb(255, 255, 255)",
+      "bg": "rgb(255,255,255)",
+      "ratio": 1,
+      "wcag_aa_pass": false
+    }
+  ],
+  "modal_interaction_verified": true,
+  "threshold_pill_interaction": true,
+  "matrix_tab_switching_verified": true,
+  "console_errors_count": 0
+}
