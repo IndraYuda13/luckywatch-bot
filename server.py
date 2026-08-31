@@ -45,21 +45,20 @@ LOG_FILE = Path("/root/projects/luckywatch-bot/bot.log")
 # In-memory proxy geo cache and user balance cache
 _GEO_CACHE: Dict[str, dict] = {}
 _LAST_USER_FETCH: Dict[str, dict] = {}
-CACHE_TTL_USER = 12  # seconds between upstream balance polling per account
+CACHE_TTL_USER = 30  # seconds between upstream balance polling per account
 
 
 def resolve_account_balance(
     email: str,
     cookie_str: str,
     proxy_url: str,
-    timeout: float = 4.0,
+    timeout: float = 2.0,
 ) -> Tuple[float, int, str]:
     """
     Robust multi-tier balance resolver:
       - Tier 1: /api/user/ (getCurrentUser)
       - Tier 2: /api/user/tasks/ (method: get)
-      - Tier 3: /api/user/settings/ (method: get)
-      - Tier 4: live state/fleet_state.json cache
+      - Tier 3: live state/fleet_state.json cache
     Returns (balance_float, clovers_int, source_tier).
     """
     opener = None
@@ -122,30 +121,7 @@ def resolve_account_balance(
         except Exception:
             pass
 
-        # Tier 3: /api/user/settings/ with method: get
-        try:
-            req3 = urllib.request.Request(
-                "https://luckywatch.pro/api/user/settings/",
-                data=urllib.parse.urlencode({"method": "get"}).encode("utf-8"),
-                headers=headers,
-            )
-            with opener.open(req3, timeout=timeout) as res3:
-                s_data = json.loads(res3.read().decode("utf-8"))
-                if s_data.get("status") == "ok" and isinstance(s_data.get("data"), dict):
-                    user_obj = s_data["data"].get("user", {})
-                    s_bal = user_obj.get("balance")
-                    s_clov = user_obj.get("clover")
-                    if s_bal is not None:
-                        try:
-                            bf = float(s_bal)
-                            clov = int(s_clov) if s_clov is not None else int(bf / 0.00025 * 15)
-                            return bf, clov, "tier3_userSettings"
-                        except (ValueError, TypeError):
-                            pass
-        except Exception:
-            pass
-
-    # Tier 4: live state/fleet_state.json cache
+    # Tier 3: live state/fleet_state.json cache
     if FLEET_STATE_FILE.exists():
         try:
             fleet_st = json.loads(FLEET_STATE_FILE.read_text())
@@ -156,7 +132,7 @@ def resolve_account_balance(
                 try:
                     bf = float(f_bal)
                     clov = int(f_clov) if f_clov is not None else int(bf / 0.00025 * 15)
-                    return bf, clov, "tier4_fleetState"
+                    return bf, clov, "tier3_fleetState"
                 except (ValueError, TypeError):
                     pass
         except Exception:
@@ -364,14 +340,17 @@ def get_latest_stats() -> dict:
             )
             email_verified = False
             server_wallet_set = False
-            with opener.open(req, timeout=3.5) as res:
-                u_set = json.loads(res.read().decode("utf-8"))
-                if u_set.get("status") == "ok":
-                    user_obj = u_set.get("data", {}).get("user", {})
-                    services_obj = u_set.get("data", {}).get("services", {})
-                    email_verified = user_obj.get("emailactive") == "1"
-                    remote_wallet = services_obj.get("faucetpayusdt")
-                    server_wallet_set = bool(remote_wallet and remote_wallet.strip())
+            try:
+                with opener.open(req, timeout=2.5) as res:
+                    u_set = json.loads(res.read().decode("utf-8"))
+                    if u_set.get("status") == "ok":
+                        user_obj = u_set.get("data", {}).get("user", {})
+                        services_obj = u_set.get("data", {}).get("services", {})
+                        email_verified = user_obj.get("emailactive") == "1"
+                        remote_wallet = services_obj.get("faucetpayusdt")
+                        server_wallet_set = bool(remote_wallet and remote_wallet.strip())
+            except Exception:
+                pass
 
             # Fast daily bonus check
             req_b = urllib.request.Request(
@@ -385,17 +364,20 @@ def get_latest_stats() -> dict:
             )
             daily_bonus_claimed = False
             daily_bonus_progress = "0/500"
-            with opener.open(req_b, timeout=3.5) as res:
-                b_set = json.loads(res.read().decode("utf-8"))
-                if b_set.get("status") == "ok":
-                    b_data = b_set.get("data", {})
-                    daily_bonus_cnt = int(b_data.get("dailyBonusCnt", 0))
-                    view_cur_day = int(b_data.get("viewCurDay", 0))
-                    daily_bonus_claimed = daily_bonus_cnt > 0
-                    daily_bonus_progress = f"{view_cur_day}/500"
+            try:
+                with opener.open(req_b, timeout=2.5) as res:
+                    b_set = json.loads(res.read().decode("utf-8"))
+                    if b_set.get("status") == "ok":
+                        b_data = b_set.get("data", {})
+                        daily_bonus_cnt = int(b_data.get("dailyBonusCnt", 0))
+                        view_cur_day = int(b_data.get("viewCurDay", 0))
+                        daily_bonus_claimed = daily_bonus_cnt > 0
+                        daily_bonus_progress = f"{view_cur_day}/500"
+            except Exception:
+                pass
 
             # Multi-tier user balance resolution
-            bal_num, clov_num, tier_src = resolve_account_balance(email, cookie_str, proxy_url, timeout=3.5)
+            bal_num, clov_num, tier_src = resolve_account_balance(email, cookie_str, proxy_url, timeout=2.5)
             bal_val = f"{bal_num:.7f}"
             clov_val = clov_num
 
@@ -422,7 +404,7 @@ def get_latest_stats() -> dict:
                         "Content-Type": "application/x-www-form-urlencoded",
                     },
                 )
-                with opener.open(req_p, timeout=3.5) as res:
+                with opener.open(req_p, timeout=2.5) as res:
                     p_res = json.loads(res.read().decode("utf-8"))
                     if p_res.get("status") == "ok":
                         items = p_res.get("data", {}).get("items", [])
@@ -545,11 +527,11 @@ def get_latest_stats() -> dict:
             daily_bonus_progress = last_fetch.get("daily_bonus_progress", "0/500")
             last_payout = last_fetch.get("last_payout")
         else:
-            # Fallback balance lookup if not in _LAST_USER_FETCH
-            bal_num, clov_num, _ = resolve_account_balance(email, cookie_str, proxy_url, timeout=2.0)
-            if bal_num > 0 or balance_val == "0.0000000":
-                balance_val = f"{bal_num:.7f}"
-                clovers_val = clov_num
+            # Fallback balance lookup from fleet_state if not in _LAST_USER_FETCH
+            f_entry = fleet_states_map.get(email, {})
+            if f_entry.get("balance"):
+                balance_val = str(f_entry["balance"])
+                clovers_val = int(f_entry.get("clovers", clovers_val))
 
         # Build current task structure
         curr_task = live_st.get("current_task")
@@ -564,39 +546,8 @@ def get_latest_stats() -> dict:
         else:
             task_dict = None
 
-        # Fetch latest payout history item if available
-        last_payout = None
-        if cookie_str:
-            try:
-                opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
-                req_h = urllib.request.Request(
-                    "https://luckywatch.pro/api/user/payout/",
-                    data=urllib.parse.urlencode({"method": "history", "page": 1}).encode("utf-8"),
-                    headers={"Cookie": cookie_str, "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0"},
-                )
-                with opener.open(req_h, timeout=2) as res_h:
-                    h_data = json.loads(res_h.read().decode("utf-8")).get("data", {}).get("history", {}).get("data", [])
-                    if h_data:
-                        item = h_data[0]
-                        # LuckyWatch Payout Status Mapping (from live /payouts?tab=history DOM inspection):
-                        # status: "1" = PAID (Dibayar)
-                        # status: "2" = IN PROGRESS / PROCESSING
-                        # status: "0" = CANCELLED / ERROR
-                        status_map = {
-                            "1": "PAID",
-                            "2": "IN PROGRESS",
-                            "0": "PAYMENT ERROR"
-                        }
-                        last_payout = {
-                            "id": item.get("id"),
-                            "amount": item.get("val"),
-                            "net_amount": item.get("commissionVal"),
-                            "wallet": item.get("account"),
-                            "status": status_map.get(str(item.get("status")), "IN PROGRESS"),
-                            "timestamp": time.strftime("%Y-%m-%d %H:%M", time.localtime(int(item.get("unixtime", 0)))),
-                        }
-            except Exception:
-                pass
+        # Use last_payout from fetch or cache (avoid redundant blocking sequential requests)
+        last_payout = last_fetch.get("last_payout")
 
         acc_obj = {
             "email": email,

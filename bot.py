@@ -587,17 +587,11 @@ class AccountWorker(threading.Thread):
         logger.info(f"⚡ [AUTO-WITHDRAW TRIGGERED] Balance (${current_balance:.5f} USD) >= Threshold (${threshold:.2f} USD). Initiating payout for {self.email} to {wallet} ...")
 
         try:
-            payload = {
-                "sum": f"{current_balance:.5f}",
+            res = self._api("user/payout/send/", data={
+                "sum": f"{current_balance:.7f}",
                 "service": "faucetpayusdt",
-                "captcha": ""
-            }
-            req = urllib.request.Request(
-                f"{self.base_url}/api/user/payout/send/",
-                data=urllib.parse.urlencode(payload).encode("utf-8"),
-                headers=self.headers
-            )
-            res = json.loads(self.opener.open(req, timeout=10).read().decode("utf-8"))
+                "captcha": "",
+            }, timeout=15)
             if res.get("status") == "ok":
                 logger.info(f"🎉 [AUTO-WITHDRAW SUCCESS] Payout submitted for {self.email}! Response: {res.get('data')}")
             else:
@@ -918,11 +912,13 @@ class AccountWorker(threading.Thread):
                 except Exception as e:
                     logger.warning(f"Daily bonus check notice: {e}")
 
-            # Always fetch real user balance from server
+            # Always fetch real user balance from server and check auto-withdraw
             try:
                 u_curr = self.get_user_info().get("data", {})
+                bal_val = float(u_curr.get('balance', 0.0) or 0.0)
                 if u_curr.get('balance') is not None:
                     logger.info(f"💰 REAL BALANCE: ${u_curr.get('balance')} USD | Clovers: {u_curr.get('clover', 0)}")
+                self.check_and_trigger_auto_withdraw(bal_val)
             except Exception:
                 pass
 
@@ -938,7 +934,9 @@ class AccountWorker(threading.Thread):
                     watched_in_batch += 1
                     try:
                         u = self.get_user_info().get("data", {})
+                        bal_val = float(u.get('balance', 0.0) or 0.0)
                         logger.info(f"💰 REAL BALANCE: ${u.get('balance')} USD | Clovers: {u.get('clover')}")
+                        self.check_and_trigger_auto_withdraw(bal_val)
                     except Exception:
                         pass
                     time.sleep(delay)
