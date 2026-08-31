@@ -37,6 +37,25 @@ logger = logging.getLogger("LuckyWatchBot")
 CONFIG_FILE = Path("config.json")
 STATE_FILE = Path("state/sessions.json")
 FLEET_STATE_FILE = Path("state/fleet_state.json")
+_FILE_WRITE_LOCK = threading.Lock()
+
+
+def atomic_write_json(file_path: Path, data: Any, indent: int = 2) -> None:
+    """Thread-safe and process-safe atomic JSON file writer using temp file replacement."""
+    with _FILE_WRITE_LOCK:
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = file_path.with_name(f"{file_path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            content = json.dumps(data, indent=indent) + "\n"
+            tmp_path.write_text(content, encoding="utf-8")
+            os.replace(tmp_path, file_path)
+        except Exception:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except Exception:
+                    pass
+            raise
 
 
 class AccountWorker(threading.Thread):
@@ -63,44 +82,47 @@ class AccountWorker(threading.Thread):
     def update_fleet_state(self, status: str, countdown_sleep: int = 0, current_task: Optional[Dict[str, Any]] = None, error_reason: Optional[str] = None, daily_done: Optional[int] = None, hourly_done: Optional[int] = None):
         """Atomically persist worker live state directly to state/fleet_state.json for O(1) instant dashboard sync."""
         try:
-            FLEET_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
             fleet_data = {}
-            if FLEET_STATE_FILE.exists():
-                try:
-                    fleet_data = json.loads(FLEET_STATE_FILE.read_text())
-                except Exception:
-                    fleet_data = {}
+            with _FILE_WRITE_LOCK:
+                if FLEET_STATE_FILE.exists():
+                    try:
+                        fleet_data = json.loads(FLEET_STATE_FILE.read_text(encoding="utf-8"))
+                    except Exception:
+                        fleet_data = {}
 
-            acc_entry = fleet_data.setdefault(self.email, {})
-            acc_entry["status"] = status
-            acc_entry["countdown_sleep"] = int(countdown_sleep)
-            if countdown_sleep > 0:
-                acc_entry["sleep_until_ts"] = int(time.time() + countdown_sleep)
-            else:
-                acc_entry["sleep_until_ts"] = 0
+                acc_entry = fleet_data.setdefault(self.email, {})
+                acc_entry["status"] = status
+                acc_entry["countdown_sleep"] = int(countdown_sleep)
+                if countdown_sleep > 0:
+                    acc_entry["sleep_until_ts"] = int(time.time() + countdown_sleep)
+                else:
+                    acc_entry["sleep_until_ts"] = 0
 
-            if current_task is not None:
-                acc_entry["current_task"] = current_task
-            elif status == "SLEEPING":
-                if acc_entry.get("current_task"):
-                    acc_entry["current_task"]["status"] = "SLEEPING"
+                if current_task is not None:
+                    acc_entry["current_task"] = current_task
+                elif status == "SLEEPING":
+                    if acc_entry.get("current_task"):
+                        acc_entry["current_task"]["status"] = "SLEEPING"
 
-            if error_reason is not None:
-                acc_entry["error_reason"] = error_reason
-            elif status == "ACTIVE":
-                acc_entry["error_reason"] = None
+                if error_reason is not None:
+                    acc_entry["error_reason"] = error_reason
+                elif status == "ACTIVE":
+                    acc_entry["error_reason"] = None
 
-            if daily_done is not None:
-                acc_entry["daily_done"] = int(daily_done)
-            if hourly_done is not None:
-                acc_entry["hourly_done"] = int(hourly_done)
+                if daily_done is not None:
+                    acc_entry["daily_done"] = int(daily_done)
+                if hourly_done is not None:
+                    acc_entry["hourly_done"] = int(hourly_done)
 
-            acc_entry["balance"] = getattr(self, "_last_known_balance", "0.0000000")
-            acc_entry["clovers"] = getattr(self, "_last_known_clovers", 0)
-            acc_entry["updated_at"] = time.strftime("%H:%M:%S")
-            acc_entry["timestamp"] = int(time.time())
+                acc_entry["balance"] = getattr(self, "_last_known_balance", "0.0000000")
+                acc_entry["clovers"] = getattr(self, "_last_known_clovers", 0)
+                acc_entry["updated_at"] = time.strftime("%H:%M:%S")
+                acc_entry["timestamp"] = int(time.time())
 
-            FLEET_STATE_FILE.write_text(json.dumps(fleet_data, indent=2) + "\n")
+                FLEET_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                tmp_path = FLEET_STATE_FILE.with_name(f"{FLEET_STATE_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+                tmp_path.write_text(json.dumps(fleet_data, indent=2) + "\n", encoding="utf-8")
+                os.replace(tmp_path, FLEET_STATE_FILE)
         except Exception:
             pass
 
@@ -388,21 +410,24 @@ class AccountWorker(threading.Thread):
                     user_res = self.get_user_info()
                     user_data = user_res.get("data", {})
 
-                    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-                    state_data = {"version": 1, "sessions": {}}
-                    if STATE_FILE.exists():
-                        try:
-                            state_data = json.loads(STATE_FILE.read_text())
-                        except Exception:
-                            pass
+                    with _FILE_WRITE_LOCK:
+                        state_data = {"version": 1, "sessions": {}}
+                        if STATE_FILE.exists():
+                            try:
+                                state_data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+                            except Exception:
+                                pass
 
-                    state_data.setdefault("sessions", {})[self.email] = {
-                        "email": self.email,
-                        "cookie_string": self.cookie_string,
-                        "user": user_data,
-                        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    }
-                    STATE_FILE.write_text(json.dumps(state_data, indent=2) + "\n")
+                        state_data.setdefault("sessions", {})[self.email] = {
+                            "email": self.email,
+                            "cookie_string": self.cookie_string,
+                            "user": user_data,
+                            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        }
+                        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                        tmp_path = STATE_FILE.with_name(f"{STATE_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+                        tmp_path.write_text(json.dumps(state_data, indent=2) + "\n", encoding="utf-8")
+                        os.replace(tmp_path, STATE_FILE)
                     logger.info(f"Session successfully saved to {STATE_FILE}")
                     return {"status": "success", "source": "http_login", "user": user_data}
                 else:
@@ -705,7 +730,7 @@ class AccountWorker(threading.Thread):
         except Exception:
             pass
 
-        logger.info(f"Worker started for {self.email} (Dynamic 24/7 Autopilot) ...")
+        logger.info(f"Worker started for {self.email} (Dynamic 24/7 Autopilot | Daemon: {self.daemon_mode}) ...")
 
         cycle_count = 0
         total_session_earned = 0
@@ -737,7 +762,7 @@ class AccountWorker(threading.Thread):
                     total_session_earned += 1
                     try:
                         u = self.get_user_info().get("data", {})
-                        bal_val = float(u.get('balance', 0.0))
+                        bal_val = float(u.get('balance', 0.0) or 0.0)
                         logger.info(f"💰 REAL BALANCE: ${u.get('balance')} USD | Clovers: {u.get('clover')}")
                         self.check_and_trigger_auto_withdraw(bal_val)
                     except Exception:
@@ -768,6 +793,12 @@ class AccountWorker(threading.Thread):
                     self.adaptive_sleep(15, reason="queue_empty")
                 else:
                     time.sleep(delay)
+
+            if not self.daemon_mode:
+                logger.info(f"Non-daemon cycle completed for {self.email}. Session earned: {total_session_earned} videos.")
+                break
+
+            time.sleep(3)
 
     def watch_single_video(self) -> Dict[str, Any]:
         """Execute one complete video watch and real reward claim cycle."""
@@ -883,87 +914,6 @@ class AccountWorker(threading.Thread):
             elif "limitInDay" in msg:
                 return {"status": "limit_day"}
             return {"status": "skipped", "message": msg}
-
-    def run(self):
-        """Worker thread main execution loop."""
-        self.check_proxy()
-        try:
-            self.login(max_retries=5)
-        except Exception as e:
-            logger.error(f"Login failed for {self.email}: {e}")
-            return
-
-        runner_cfg = self.global_config.get("runner", {})
-        limit_count = runner_cfg.get("max_videos_per_cycle", 50)
-        delay = runner_cfg.get("delay_between_videos_seconds", 2)
-        auto_bonus = runner_cfg.get("auto_daily_bonus", True)
-
-        try:
-            self.check_ip_verification()
-        except Exception:
-            pass
-
-        logger.info(f"Worker started for {self.email} (24/7 Daemon: {self.daemon_mode}) ...")
-
-        while not self.stop_event.is_set():
-            if auto_bonus:
-                try:
-                    self.claim_daily_bonus()
-                except Exception as e:
-                    logger.warning(f"Daily bonus check notice: {e}")
-
-            # Always fetch real user balance from server and check auto-withdraw
-            try:
-                u_curr = self.get_user_info().get("data", {})
-                bal_val = float(u_curr.get('balance', 0.0) or 0.0)
-                if u_curr.get('balance') is not None:
-                    logger.info(f"💰 REAL BALANCE: ${u_curr.get('balance')} USD | Clovers: {u_curr.get('clover', 0)}")
-                self.check_and_trigger_auto_withdraw(bal_val)
-            except Exception:
-                pass
-
-            watched_in_batch = 0
-            for i in range(1, limit_count + 1):
-                if self.stop_event.is_set():
-                    break
-
-                logger.info(f"\n--- [Batch Cycle {i}/{limit_count} | Session Earned: {watched_in_batch}] ---")
-                res = self.watch_single_video()
-
-                if res.get("status") == "success":
-                    watched_in_batch += 1
-                    try:
-                        u = self.get_user_info().get("data", {})
-                        bal_val = float(u.get('balance', 0.0) or 0.0)
-                        logger.info(f"💰 REAL BALANCE: ${u.get('balance')} USD | Clovers: {u.get('clover')}")
-                        self.check_and_trigger_auto_withdraw(bal_val)
-                    except Exception:
-                        pass
-                    time.sleep(delay)
-                elif res.get("status") == "limit_hour":
-                    sleep_hr = self.seconds_until_next_hour()
-                    logger.info(f"⏰ Hourly limit reached (limitInHour). Sleeping {sleep_hr}s until next hour (:01) ...")
-                    time.sleep(sleep_hr)
-                    break
-                elif res.get("status") == "limit_day":
-                    sleep_day = self.seconds_until_next_day()
-                    logger.info(f"🌙 Daily limit reached (limitInDay). Sleeping {sleep_day}s until tomorrow reset (00:01) ...")
-                    time.sleep(sleep_day)
-                    break
-                elif res.get("status") == "empty":
-                    # Non-fatal queue empty (video buffering): short backoff 30s instead of long sleep
-                    logger.warning(f"Temporary empty task ({res.get('message')}). Retrying task fetch in 30s ...")
-                    time.sleep(30)
-                    break
-                else:
-                    time.sleep(2)
-
-            if not self.daemon_mode:
-                logger.info(f"Non-daemon batch completed for {self.email}. Watched: {watched_in_batch} videos.")
-                break
-
-            # Short breath before checking next cycle
-            time.sleep(3)
 
 
 class MultiBotManager:

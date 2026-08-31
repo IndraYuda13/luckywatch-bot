@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import subprocess
 import threading
 import time
@@ -41,6 +42,42 @@ CONFIG_FILE = Path("/root/projects/luckywatch-bot/config.json")
 STATE_FILE = Path("/root/projects/luckywatch-bot/state/sessions.json")
 FLEET_STATE_FILE = Path("/root/projects/luckywatch-bot/state/fleet_state.json")
 LOG_FILE = Path("/root/projects/luckywatch-bot/bot.log")
+
+_SERVER_WRITE_LOCK = threading.Lock()
+
+
+def get_dashboard_api_key() -> str:
+    """Read or generate persistent dashboard_api_key in config.json."""
+    if not CONFIG_FILE.exists():
+        return "lw_sec_default_key"
+    try:
+        cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        key = cfg.get("dashboard_api_key")
+        if not key:
+            key = f"lw_{secrets.token_hex(16)}"
+            cfg["dashboard_api_key"] = key
+            atomic_write_json(CONFIG_FILE, cfg)
+        return str(key)
+    except Exception:
+        return "lw_sec_default_key"
+
+
+def atomic_write_json(file_path: Path, data: Any, indent: int = 2) -> None:
+    """Thread-safe and process-safe atomic JSON file writer using temp file replacement."""
+    with _SERVER_WRITE_LOCK:
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = file_path.with_name(f"{file_path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            content = json.dumps(data, indent=indent) + "\n"
+            tmp_path.write_text(content, encoding="utf-8")
+            os.replace(tmp_path, file_path)
+        except Exception:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except Exception:
+                    pass
+            raise
 
 # In-memory proxy geo cache and user balance cache
 _GEO_CACHE: Dict[str, dict] = {}
@@ -191,22 +228,34 @@ def get_proxy_geo(proxy_url: str) -> dict:
 
 
 def parse_bot_logs(max_lines: int = 150) -> Tuple[List[str], Dict[str, List[str]], Dict[str, Dict[str, Any]]]:
-    """Parse tail logs and extract live worker states and per-account log streams."""
+    """Parse tail logs efficiently via bounded tail seek buffer (max 128KB) to prevent unbounded RAM usage."""
     if not LOG_FILE.exists():
         return [], {}, {}
 
     try:
-        lines = LOG_FILE.read_text(errors="ignore").strip().splitlines()
-        tail = lines[-max_lines:]
+        # Bounded tail buffer read (only read the last 128KB chunk instead of multi-megabyte file)
+        chunk_size = 131072  # 128 KB
+        with LOG_FILE.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            file_size = f.tell()
+            seek_pos = max(0, file_size - chunk_size)
+            f.seek(seek_pos)
+            raw_bytes = f.read()
+
+        raw_text = raw_bytes.decode("utf-8", errors="ignore")
+        raw_lines = raw_text.splitlines()
+        # If we sought into the middle of a file, the first line is likely partial/corrupt; drop it
+        if seek_pos > 0 and len(raw_lines) > 1:
+            raw_lines = raw_lines[1:]
+
+        tail = raw_lines[-max_lines:] if max_lines > 0 else raw_lines
+        scan_lines = raw_lines[-200:] if len(raw_lines) > 200 else raw_lines
     except Exception:
         tail = []
-        lines = []
+        scan_lines = []
 
     account_logs: Dict[str, List[str]] = {}
     account_live_state: Dict[str, Dict[str, Any]] = {}
-
-    # Scan 150 lines only for log stream rendering (state is now independently read from fleet_state.json)
-    scan_lines = lines[-200:] if len(lines) > 200 else lines
 
     for line in scan_lines:
         m = re.match(r"^(\d{2}:\d{2}:\d{2})\s+\[(\w+)\]\s+(?:\[([\w\.-]+)\]\s+)?(.*)$", line)
@@ -384,11 +433,15 @@ def get_latest_stats() -> dict:
             # Update fleet_state.json if live resolved balance > 0
             if bal_num > 0 and FLEET_STATE_FILE.exists():
                 try:
-                    f_st = json.loads(FLEET_STATE_FILE.read_text())
-                    if email in f_st:
-                        f_st[email]["balance"] = bal_val
-                        f_st[email]["clovers"] = clov_val
-                        FLEET_STATE_FILE.write_text(json.dumps(f_st, indent=2) + "\n")
+                    with _SERVER_WRITE_LOCK:
+                        f_st = json.loads(FLEET_STATE_FILE.read_text(encoding="utf-8"))
+                        if email in f_st:
+                            f_st[email]["balance"] = bal_val
+                            f_st[email]["clovers"] = clov_val
+                            FLEET_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                            tmp_path = FLEET_STATE_FILE.with_name(f"{FLEET_STATE_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+                            tmp_path.write_text(json.dumps(f_st, indent=2) + "\n", encoding="utf-8")
+                            os.replace(tmp_path, FLEET_STATE_FILE)
                 except Exception:
                     pass
 
@@ -1933,6 +1986,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
   <script>
     /* STATE MANAGEMENT */
+    const DASHBOARD_API_KEY = "__DASHBOARD_API_KEY__";
     let globalState = null;
     let selectedThreshold = 0.10;
     let accountFilter = 'all';
@@ -2484,7 +2538,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     /* ACTIONS & TOASTS */
     async function triggerAction(actionName) {
       try {
-        const res = await fetch(`/api/actions/${actionName}`, { method: 'POST' });
+        const res = await fetch(`/api/actions/${actionName}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Dashboard-Key': DASHBOARD_API_KEY
+          }
+        });
         const result = await res.json();
         showToast(result.message || `Action ${actionName} executed`);
         fetchStats();
@@ -2514,7 +2574,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       try {
         const res = await fetch('/api/actions/send_verify_email', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Dashboard-Key': DASHBOARD_API_KEY
+          },
           body: JSON.stringify({ email: email })
         });
         const result = await res.json();
@@ -2534,7 +2597,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       try {
         const res = await fetch('/api/actions/config_auto_withdraw', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Dashboard-Key': DASHBOARD_API_KEY
+          },
           body: JSON.stringify({ enabled: newEnabled, threshold_usd: threshold })
         });
         const result = await res.json();
@@ -2569,7 +2635,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       try {
         const res = await fetch('/api/actions/save_wallet', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Dashboard-Key': DASHBOARD_API_KEY
+          },
           body: JSON.stringify({ email: currentModalEmail, wallet: wallet, code: '' })
         });
         const result = await res.json();
@@ -2592,7 +2661,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       try {
         const res = await fetch('/api/actions/save_wallet', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Dashboard-Key': DASHBOARD_API_KEY
+          },
           body: JSON.stringify({ email: currentModalEmail, wallet: wallet, code: code })
         });
         const result = await res.json();
@@ -2620,7 +2692,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       try {
         const res = await fetch('/api/actions/withdraw', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Dashboard-Key': DASHBOARD_API_KEY
+          },
           body: JSON.stringify({ email: email })
         });
         const result = await res.json();
@@ -2643,7 +2718,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       try {
         const res = await fetch('/api/actions/withdraw_all', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Dashboard-Key': DASHBOARD_API_KEY
+          },
           body: JSON.stringify({ threshold: selectedThreshold })
         });
         const result = await res.json();
@@ -2703,18 +2781,46 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Dashboard-Key, Authorization")
         self.end_headers()
+
+    def _check_auth(self) -> bool:
+        """Validate dashboard API key from header X-Dashboard-Key, Authorization Bearer, or query param key."""
+        expected_key = get_dashboard_api_key()
+        if not expected_key:
+            return True
+
+        # Header check
+        header_key = self.headers.get("X-Dashboard-Key")
+        if header_key and secrets.compare_digest(header_key.strip(), expected_key):
+            return True
+
+        auth_header = self.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            bearer_token = auth_header[7:].strip()
+            if secrets.compare_digest(bearer_token, expected_key):
+                return True
+
+        # Query param check
+        parsed = urllib.parse.urlparse(self.path)
+        qs = urllib.parse.parse_qs(parsed.query)
+        query_key = qs.get("key", [None])[0]
+        if query_key and secrets.compare_digest(query_key.strip(), expected_key):
+            return True
+
+        return False
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
 
         if path == "/" or path == "/index.html":
+            api_key = get_dashboard_api_key()
+            html_injected = DASHBOARD_HTML.replace("__DASHBOARD_API_KEY__", api_key)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
-            self.wfile.write(DASHBOARD_HTML.encode("utf-8"))
+            self.wfile.write(html_injected.encode("utf-8"))
         elif path == "/api/stats":
             stats = get_latest_stats()
             self._send_json(200, stats)
@@ -2725,6 +2831,12 @@ class Handler(BaseHTTPRequestHandler):
         global _LAST_USER_FETCH, _GEO_CACHE
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+
+        # Protect sensitive action endpoints
+        if path.startswith("/api/actions/"):
+            if not self._check_auth():
+                self._send_json(401, {"status": "error", "message": "Unauthorized: Invalid or missing dashboard API key."})
+                return
 
         if path == "/api/actions/retry":
             # Restart bot worker daemon via systemctl or direct signal
@@ -2752,7 +2864,7 @@ class Handler(BaseHTTPRequestHandler):
                 if "service" not in auto_cfg:
                     auto_cfg["service"] = "faucetpayusdt"
 
-                CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
+                atomic_write_json(CONFIG_FILE, cfg)
                 self._send_json(200, {"status": "ok", "message": f"Auto-withdraw set to {'ON' if auto_cfg['enabled'] else 'OFF'} at ${auto_cfg['threshold_usd']:.2f} USD."})
             except Exception as e:
                 self._send_json(500, {"status": "error", "message": f"Failed to update auto_withdraw config: {e}"})
@@ -2779,7 +2891,7 @@ class Handler(BaseHTTPRequestHandler):
                             found = True
                             break
                     if found:
-                        CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
+                        atomic_write_json(CONFIG_FILE, cfg)
 
                 # Update remote settings on LuckyWatch if session active
                 remote_msg = "Saved locally in config."
