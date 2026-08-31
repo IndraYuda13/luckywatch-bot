@@ -416,33 +416,88 @@ class AccountWorker(threading.Thread):
 
     def get_user_info(self) -> Dict[str, Any]:
         """Fetch current user profile and balance with multi-endpoint fallback."""
-        res = self._api("user/", data={"method": "getCurrentUser"})
-        if res.get("status") == "ok" and res.get("data") and res.get("data", {}).get("balance") is not None:
-            u_d = res["data"]
-            self._last_known_balance = str(u_d.get("balance", "0.0000000"))
-            if "clover" in u_d:
-                self._last_known_clovers = u_d.get("clover", 0)
-            return res
+        # Tier 1: Primary check via user/ (getCurrentUser)
+        try:
+            res = self._api("user/", data={"method": "getCurrentUser"})
+            if res.get("status") == "ok" and res.get("data") and res.get("data", {}).get("balance") is not None:
+                u_d = res["data"]
+                self._last_known_balance = str(u_d.get("balance", "0.0000000"))
+                if "clover" in u_d:
+                    self._last_known_clovers = u_d.get("clover", 0)
+                return res
+        except Exception:
+            pass
 
-        # Fallback 1: Check user/settings/
-        s_res = self._api("user/settings/", data={"method": "get"})
-        if s_res.get("status") == "ok" and s_res.get("data", {}).get("user"):
-            u_data = s_res["data"]["user"]
-            if u_data.get("balance") is not None:
-                self._last_known_balance = str(u_data.get("balance"))
-                if "clover" in u_data:
-                    self._last_known_clovers = u_data.get("clover", 0)
-                return {
-                    "status": "ok",
-                    "data": {
-                        "email": self.email,
-                        "balance": str(u_data.get("balance")),
-                        "clover": u_data.get("clover", getattr(self, "_last_known_clovers", 0)),
-                        "id": str(u_data.get("id", "")),
+        # Tier 2: Probe active task stream (user/tasks/ method: get)
+        try:
+            t_res = self._api("user/tasks/", data={"method": "get"})
+            if t_res.get("status") == "ok" and isinstance(t_res.get("data"), dict):
+                t_bal = t_res["data"].get("balance")
+                if t_bal is not None:
+                    self._last_known_balance = str(t_bal)
+                    try:
+                        self._last_known_clovers = int(float(t_bal) / 0.00025 * 15)
+                    except Exception:
+                        pass
+                    return {
+                        "status": "ok",
+                        "data": {
+                            "email": self.email,
+                            "balance": str(t_bal),
+                            "clover": getattr(self, "_last_known_clovers", 0),
+                            "id": "",
+                        },
                     }
-                }
+        except Exception:
+            pass
 
-        # Fallback 2: Use real-time balance tracked from active task stream (user/tasks/)
+        # Tier 3: Check user/settings/
+        try:
+            s_res = self._api("user/settings/", data={"method": "get"})
+            if s_res.get("status") == "ok" and s_res.get("data", {}).get("user"):
+                u_data = s_res["data"]["user"]
+                if u_data.get("balance") is not None:
+                    self._last_known_balance = str(u_data.get("balance"))
+                    if "clover" in u_data:
+                        self._last_known_clovers = u_data.get("clover", 0)
+                    return {
+                        "status": "ok",
+                        "data": {
+                            "email": self.email,
+                            "balance": str(u_data.get("balance")),
+                            "clover": u_data.get("clover", getattr(self, "_last_known_clovers", 0)),
+                            "id": str(u_data.get("id", "")),
+                        },
+                    }
+        except Exception:
+            pass
+
+        # Tier 4: Persistent fleet_state.json cache
+        if FLEET_STATE_FILE.exists():
+            try:
+                fleet_st = json.loads(FLEET_STATE_FILE.read_text())
+                f_acc = fleet_st.get(self.email, {})
+                f_bal = f_acc.get("balance")
+                if f_bal is not None:
+                    self._last_known_balance = str(f_bal)
+                    if "clovers" in f_acc:
+                        try:
+                            self._last_known_clovers = int(f_acc.get("clovers", 0))
+                        except Exception:
+                            pass
+                    return {
+                        "status": "ok",
+                        "data": {
+                            "email": self.email,
+                            "balance": str(f_bal),
+                            "clover": getattr(self, "_last_known_clovers", 0),
+                            "id": "",
+                        },
+                    }
+            except Exception:
+                pass
+
+        # Tier 5: In-memory last known balance fallback
         bal = getattr(self, "_last_known_balance", None)
         if bal is not None:
             return {
@@ -452,10 +507,10 @@ class AccountWorker(threading.Thread):
                     "balance": str(bal),
                     "clover": getattr(self, "_last_known_clovers", 0),
                     "id": "",
-                }
+                },
             }
 
-        return res
+        return {"status": "error", "message": "Failed to resolve user balance across all tiers"}
 
     def get_limits(self) -> Dict[str, Any]:
         """Fetch daily/hourly video viewing limits."""
@@ -517,7 +572,7 @@ class AccountWorker(threading.Thread):
             return
 
         threshold = float(auto_cfg.get("threshold_usd", 0.10))
-        wallet = self.account_config.get("faucetpay_usdt_trc20", "").strip()
+        wallet = (self.account.get("faucetpay_usdt_trc20") or "").strip()
 
         # Minimum LuckyWatch payout is $0.10 USD and wallet must be set
         if not wallet or current_balance < threshold or current_balance < 0.10:

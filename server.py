@@ -24,6 +24,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from socketserver import ThreadingMixIn
@@ -45,6 +46,123 @@ LOG_FILE = Path("/root/projects/luckywatch-bot/bot.log")
 _GEO_CACHE: Dict[str, dict] = {}
 _LAST_USER_FETCH: Dict[str, dict] = {}
 CACHE_TTL_USER = 12  # seconds between upstream balance polling per account
+
+
+def resolve_account_balance(
+    email: str,
+    cookie_str: str,
+    proxy_url: str,
+    timeout: float = 4.0,
+) -> Tuple[float, int, str]:
+    """
+    Robust multi-tier balance resolver:
+      - Tier 1: /api/user/ (getCurrentUser)
+      - Tier 2: /api/user/tasks/ (method: get)
+      - Tier 3: /api/user/settings/ (method: get)
+      - Tier 4: live state/fleet_state.json cache
+    Returns (balance_float, clovers_int, source_tier).
+    """
+    opener = None
+    if proxy_url:
+        try:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
+        except Exception:
+            opener = None
+
+    if opener is None:
+        opener = urllib.request.build_opener()
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36",
+        "Cookie": cookie_str,
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+
+    # Tier 1: /api/user/ with getCurrentUser
+    if cookie_str:
+        try:
+            req1 = urllib.request.Request(
+                "https://luckywatch.pro/api/user/",
+                data=urllib.parse.urlencode({"method": "getCurrentUser"}).encode("utf-8"),
+                headers=headers,
+            )
+            with opener.open(req1, timeout=timeout) as res1:
+                u_data = json.loads(res1.read().decode("utf-8"))
+                if u_data.get("status") == "ok" and isinstance(u_data.get("data"), dict):
+                    b_val = u_data["data"].get("balance")
+                    c_val = u_data["data"].get("clover", 0)
+                    if b_val is not None:
+                        try:
+                            bf = float(b_val)
+                            clov = int(c_val) if c_val is not None else int(bf / 0.00025 * 15)
+                            return bf, clov, "tier1_getCurrentUser"
+                        except (ValueError, TypeError):
+                            pass
+        except Exception:
+            pass
+
+        # Tier 2: /api/user/tasks/ with method: get
+        try:
+            req2 = urllib.request.Request(
+                "https://luckywatch.pro/api/user/tasks/",
+                data=urllib.parse.urlencode({"method": "get"}).encode("utf-8"),
+                headers=headers,
+            )
+            with opener.open(req2, timeout=timeout) as res2:
+                t_data = json.loads(res2.read().decode("utf-8"))
+                if t_data.get("status") == "ok" and isinstance(t_data.get("data"), dict):
+                    t_bal = t_data["data"].get("balance")
+                    if t_bal is not None:
+                        try:
+                            bf = float(t_bal)
+                            clov = int(bf / 0.00025 * 15)
+                            return bf, clov, "tier2_tasksGet"
+                        except (ValueError, TypeError):
+                            pass
+        except Exception:
+            pass
+
+        # Tier 3: /api/user/settings/ with method: get
+        try:
+            req3 = urllib.request.Request(
+                "https://luckywatch.pro/api/user/settings/",
+                data=urllib.parse.urlencode({"method": "get"}).encode("utf-8"),
+                headers=headers,
+            )
+            with opener.open(req3, timeout=timeout) as res3:
+                s_data = json.loads(res3.read().decode("utf-8"))
+                if s_data.get("status") == "ok" and isinstance(s_data.get("data"), dict):
+                    user_obj = s_data["data"].get("user", {})
+                    s_bal = user_obj.get("balance")
+                    s_clov = user_obj.get("clover")
+                    if s_bal is not None:
+                        try:
+                            bf = float(s_bal)
+                            clov = int(s_clov) if s_clov is not None else int(bf / 0.00025 * 15)
+                            return bf, clov, "tier3_userSettings"
+                        except (ValueError, TypeError):
+                            pass
+        except Exception:
+            pass
+
+    # Tier 4: live state/fleet_state.json cache
+    if FLEET_STATE_FILE.exists():
+        try:
+            fleet_st = json.loads(FLEET_STATE_FILE.read_text())
+            acc_entry = fleet_st.get(email, {})
+            f_bal = acc_entry.get("balance")
+            f_clov = acc_entry.get("clovers", 0)
+            if f_bal is not None:
+                try:
+                    bf = float(f_bal)
+                    clov = int(f_clov) if f_clov is not None else int(bf / 0.00025 * 15)
+                    return bf, clov, "tier4_fleetState"
+                except (ValueError, TypeError):
+                    pass
+        except Exception:
+            pass
+
+    return 0.0, 0, "fallback_zero"
 
 
 def redact_email(email: str) -> str:
@@ -276,39 +394,19 @@ def get_latest_stats() -> dict:
                     daily_bonus_claimed = daily_bonus_cnt > 0
                     daily_bonus_progress = f"{view_cur_day}/500"
 
-            # Fast user balance check
-            req_u = urllib.request.Request(
-                "https://luckywatch.pro/api/user/",
-                data=urllib.parse.urlencode({"method": "getCurrentUser"}).encode("utf-8"),
-                headers={
-                    "User-Agent": "Mozilla/5.0",
-                    "Cookie": cookie_str,
-                    "Content-Type": "application/x-www-form-urlencoded",
-                },
-            )
-            bal_val = "0.0000000"
-            clov_val = 0
-            with opener.open(req_u, timeout=3.5) as res:
-                u_data = json.loads(res.read().decode("utf-8"))
-                if u_data.get("status") == "ok":
-                    bal_val = str(u_data.get("data", {}).get("balance", "0.0000000"))
-                    clov_val = int(u_data.get("data", {}).get("clover", 0))
+            # Multi-tier user balance resolution
+            bal_num, clov_num, tier_src = resolve_account_balance(email, cookie_str, proxy_url, timeout=3.5)
+            bal_val = f"{bal_num:.7f}"
+            clov_val = clov_num
 
-            # Fallback balance probe from user/tasks/ if checkSecurity blocks getCurrentUser
-            if bal_val == "0.0000000":
+            # Update fleet_state.json if live resolved balance > 0
+            if bal_num > 0 and FLEET_STATE_FILE.exists():
                 try:
-                    req_t = urllib.request.Request(
-                        "https://luckywatch.pro/api/user/tasks/",
-                        data=urllib.parse.urlencode({"method": "get"}).encode("utf-8"),
-                        headers={"User-Agent": "Mozilla/5.0", "Cookie": cookie_str, "Content-Type": "application/x-www-form-urlencoded"},
-                    )
-                    with opener.open(req_t, timeout=3.5) as res_t:
-                        t_data = json.loads(res_t.read().decode("utf-8"))
-                        if t_data.get("status") == "ok" and isinstance(t_data.get("data"), dict):
-                            t_bal = t_data["data"].get("balance")
-                            if t_bal is not None:
-                                bal_val = str(t_bal)
-                                clov_val = int(float(t_bal) / 0.00025 * 15)
+                    f_st = json.loads(FLEET_STATE_FILE.read_text())
+                    if email in f_st:
+                        f_st[email]["balance"] = bal_val
+                        f_st[email]["clovers"] = clov_val
+                        FLEET_STATE_FILE.write_text(json.dumps(f_st, indent=2) + "\n")
                 except Exception:
                     pass
 
@@ -446,76 +544,12 @@ def get_latest_stats() -> dict:
             daily_bonus_claimed = last_fetch.get("daily_bonus_claimed", False)
             daily_bonus_progress = last_fetch.get("daily_bonus_progress", "0/500")
             last_payout = last_fetch.get("last_payout")
-        elif cookie_str:
-            try:
-                opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
-                req = urllib.request.Request(
-                    "https://luckywatch.pro/api/user/settings/",
-                    data=urllib.parse.urlencode({"method": "get"}).encode("utf-8"),
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36",
-                        "Cookie": cookie_str,
-                        "Content-Type": "application/x-www-form-urlencoded",
-                    },
-                )
-                with opener.open(req, timeout=3) as res:
-                    u_set = json.loads(res.read().decode("utf-8"))
-                    if u_set.get("status") == "ok":
-                        user_obj = u_set.get("data", {}).get("user", {})
-                        services_obj = u_set.get("data", {}).get("services", {})
-                        email_verified = user_obj.get("emailactive") == "1"
-                        remote_wallet = services_obj.get("faucetpayusdt")
-                        server_wallet_set = bool(remote_wallet and remote_wallet.strip())
-                        # If user object contains real-time balance
-                        if "balance" in user_obj:
-                            bal_val = str(user_obj.get("balance", bal_val))
-                        if "clover" in user_obj:
-                            clov_val = int(user_obj.get("clover", clov_val))
-
-                # Also fetch daily bonus status
-                req_b = urllib.request.Request(
-                    "https://luckywatch.pro/api/user/tasks/dailyBonus/",
-                    data=urllib.parse.urlencode({"method": "getInfo"}).encode("utf-8"),
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36",
-                        "Cookie": cookie_str,
-                        "Content-Type": "application/x-www-form-urlencoded",
-                    },
-                )
-                with opener.open(req_b, timeout=3) as res:
-                    b_set = json.loads(res.read().decode("utf-8"))
-                    if b_set.get("status") == "ok":
-                        b_data = b_set.get("data", {})
-                        daily_bonus_cnt = int(b_data.get("dailyBonusCnt", 0))
-                        view_cur_day = int(b_data.get("viewCurDay", 0))
-                        daily_bonus_claimed = daily_bonus_cnt > 0
-                        daily_bonus_progress = f"{view_cur_day}/500"
-
-                # Also fetch user balance
-                req_u = urllib.request.Request(
-                    "https://luckywatch.pro/api/user/",
-                    data=urllib.parse.urlencode({"method": "getCurrentUser"}).encode("utf-8"),
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36",
-                        "Cookie": cookie_str,
-                        "Content-Type": "application/x-www-form-urlencoded",
-                    },
-                )
-                with opener.open(req_u, timeout=3) as res_u:
-                    u_res = json.loads(res_u.read().decode("utf-8"))
-                    if u_res.get("status") == "ok" and "balance" in u_res.get("data", {}):
-                        balance_val = str(u_res["data"]["balance"])
-                        clovers_val = int(u_res["data"].get("clover", 0))
-
-                _LAST_USER_FETCH[email] = {
-                    "timestamp": now_ts,
-                    "balance": balance_val,
-                    "clovers": clovers_val,
-                    "email_verified": email_verified,
-                    "server_wallet_set": server_wallet_set,
-                }
-            except Exception:
-                pass
+        else:
+            # Fallback balance lookup if not in _LAST_USER_FETCH
+            bal_num, clov_num, _ = resolve_account_balance(email, cookie_str, proxy_url, timeout=2.0)
+            if bal_num > 0 or balance_val == "0.0000000":
+                balance_val = f"{bal_num:.7f}"
+                clovers_val = clov_num
 
         # Build current task structure
         curr_task = live_st.get("current_task")
@@ -2701,13 +2735,18 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
 
 class Handler(BaseHTTPRequestHandler):
     def _send_json(self, status_code: int, data: Any):
-        self.send_response(status_code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
-        self.wfile.write(json.dumps(data).encode("utf-8"))
+        try:
+            payload = json.dumps(data).encode("utf-8")
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.end_headers()
+            self.wfile.write(payload)
+        except Exception:
+            pass
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -2887,22 +2926,16 @@ class Handler(BaseHTTPRequestHandler):
                     return
 
                 proxy_url = acc.get("proxy", "http://127.0.0.1:31001")
-                opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
 
-                # Fetch balance
-                req_u = urllib.request.Request(
-                    "https://luckywatch.pro/api/user/",
-                    data=urllib.parse.urlencode({"method": "getCurrentUser"}).encode("utf-8"),
-                    headers={"Cookie": cookie_str, "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0"},
-                )
-                u_res = json.loads(opener.open(req_u, timeout=5).read().decode("utf-8"))
-                bal = float(u_res.get("data", {}).get("balance", 0.0))
+                # Multi-tier balance resolution
+                bal, clov, tier_src = resolve_account_balance(target_email, cookie_str, proxy_url, timeout=5.0)
 
                 if bal < 0.10:
-                    self._send_json(400, {"status": "error", "message": f"Balance (${bal:.4f}) is below minimum $0.10 USD."})
+                    self._send_json(400, {"status": "error", "message": f"Balance (${bal:.4f}) is below minimum $0.10 USD (source: {tier_src})."})
                     return
 
                 # Execute payout send API
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
                 req_p = urllib.request.Request(
                     "https://luckywatch.pro/api/user/payout/send/",
                     data=urllib.parse.urlencode({"sum": f"{bal:.7f}", "service": "faucetpayusdt", "captcha": ""}).encode("utf-8"),
@@ -2943,23 +2976,20 @@ class Handler(BaseHTTPRequestHandler):
 
                     proxy_url = acc.get("proxy", "http://127.0.0.1:31001")
                     try:
-                        opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
-                        req_u = urllib.request.Request(
-                            "https://luckywatch.pro/api/user/",
-                            data=urllib.parse.urlencode({"method": "getCurrentUser"}).encode("utf-8"),
-                            headers={"Cookie": cookie_str, "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0"},
-                        )
-                        u_res = json.loads(opener.open(req_u, timeout=4).read().decode("utf-8"))
-                        bal = float(u_res.get("data", {}).get("balance", 0.0))
+                        bal, clov, tier_src = resolve_account_balance(email, cookie_str, proxy_url, timeout=4.0)
 
                         if bal >= thresh and bal >= 0.10:
+                            opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
                             req_p = urllib.request.Request(
                                 "https://luckywatch.pro/api/user/payout/send/",
                                 data=urllib.parse.urlencode({"sum": f"{bal:.7f}", "service": "faucetpayusdt", "captcha": ""}).encode("utf-8"),
                                 headers={"Cookie": cookie_str, "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0"},
                             )
                             p_res = json.loads(opener.open(req_p, timeout=8).read().decode("utf-8"))
-                            successes.append(f"{email.split('@')[0]} (${bal:.4f})")
+                            if p_res.get("status") == "ok":
+                                successes.append(f"{email.split('@')[0]} (${bal:.4f})")
+                            else:
+                                failures.append(f"{email.split('@')[0]}: {p_res.get('message', 'Payout error')}")
                     except Exception as e:
                         failures.append(f"{email.split('@')[0]}: {e}")
 
