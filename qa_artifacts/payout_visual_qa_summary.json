@@ -1,0 +1,241 @@
+{
+  "viewports": {
+    "desktop_1440x900": {
+      "screenshot": "/root/projects/luckywatch-bot/qa_artifacts/payout_vp_desktop_1440x900_grid.png",
+      "overflow": {
+        "scrollWidth": 1440,
+        "clientWidth": 1440,
+        "overflowX": false
+      },
+      "console_count": 0
+    },
+    "laptop_1280x800": {
+      "screenshot": "/root/projects/luckywatch-bot/qa_artifacts/payout_vp_laptop_1280x800_grid.png",
+      "overflow": {
+        "scrollWidth": 1280,
+        "clientWidth": 1280,
+        "overflowX": false
+      },
+      "console_count": 0
+    },
+    "tablet_768x1024": {
+      "screenshot": "/root/projects/luckywatch-bot/qa_artifacts/payout_vp_tablet_768x1024_grid.png",
+      "overflow": {
+        "scrollWidth": 768,
+        "clientWidth": 768,
+        "overflowX": false
+      },
+      "console_count": 0
+    },
+    "mobile_390x844": {
+      "screenshot": "/root/projects/luckywatch-bot/qa_artifacts/payout_vp_mobile_390x844_grid.png",
+      "overflow": {
+        "scrollWidth": 390,
+        "clientWidth": 390,
+        "overflowX": false
+      },
+      "console_count": 0
+    },
+    "mobile_360x740": {
+      "screenshot": "/root/projects/luckywatch-bot/qa_artifacts/payout_vp_mobile_360x740_grid.png",
+      "overflow": {
+        "scrollWidth": 360,
+        "clientWidth": 360,
+        "overflowX": false
+      },
+      "console_count": 0
+    }
+  },
+  "status_chips": {
+    "card_grid": [
+      {
+        "index": 0,
+        "has_strip": true,
+        "chip_text": "\u2713\nPAID",
+        "amount_text": "$0.10000 USD",
+        "strip_bg": "rgba(16, 185, 129, 0.12)",
+        "strip_border": "rgba(16, 185, 129, 0.35)",
+        "chip_color": "rgb(52, 211, 153)"
+      },
+      {
+        "index": 1,
+        "has_strip": true,
+        "chip_text": "\u26a1\nIN PROGRESS",
+        "amount_text": "$0.50000 USD",
+        "strip_bg": "rgba(6, 182, 212, 0.12)",
+        "strip_border": "rgba(6, 182, 212, 0.35)",
+        "chip_color": "rgb(56, 189, 248)"
+      },
+      {
+        "index": 2,
+        "has_strip": true,
+        "chip_text": "\u23f3\nUNDER REVIEW",
+        "amount_text": "$1.00000 USD",
+        "strip_bg": "rgba(245, 158, 11, 0.15)",
+        "strip_border": "rgba(245, 158, 11, 0.5)",
+        "chip_color": "rgb(253, 224, 71)"
+      },
+      {
+        "index": 3,
+        "has_strip": true,
+        "chip_text": "\u26a0\ufe0f\nPAYMENT ERROR",
+        "amount_text": "$0.10000 USD",
+        "strip_bg": "rgba(244, 63, 94, 0.12)",
+        "strip_border": "rgba(244, 63, 94, 0.35)",
+        "chip_color": "rgb(251, 113, 133)"
+      }
+    ],
+    "matrix_table": [
+      {
+        "index": 0,
+        "has_cell": true,
+        "chip_text": "\u2713\nPAID",
+        "amount_text": "$0.10000",
+        "chip_color": "rgb(52, 211, 153)"
+      },
+      {
+        "index": 1,
+        "has_cell": true,
+        "chip_text": "\u26a1\nIN PROGRESS",
+        "amount_text": "$0.50000",
+        "chip_color": "rgb(56, 189, 248)"
+      },
+      {
+        "index": 2,
+        "has_cell": true,
+        "chip_text": "\u23f3\nUNDER REVIEW",
+        "amount_text": "$1.00000",
+        "chip_color": "rgb(253, 224, 71)"
+      },
+      {
+        "index": 3,
+        "has_cell": true,
+        "chip_text": "\u26a0\ufe0f\nPAYMENT ERROR",
+        "amount_text": "$0.10000",
+        "chip_color": "rgb(251, 113, 133)"
+      }
+    ]
+  },
+  "cache_headers": {
+    "status": 200,
+    "headers": {
+      "cache-control": "no-store, no-cache, must-revalidate, max-age=0",
+      "content-type": "text/html; charset=utf-8",
+      "date": "Mon, 31 Aug 2026 06:24:11 GMT",
+      "expires": "0",
+      "pragma": "no-cache",
+      "server": "BaseHTTP/0.6 Python/3.12.3"
+    }
+  },
+  "console_messages": [],
+  "layout_overflow": {
+    "desktop_1440x900": {
+      "scrollWidth": 1440,
+      "clientWidth": 1440,
+      "overflowX": false
+    },
+    "laptop_1280x800": {
+      "scrollWidth": 1280,
+      "clientWidth": 1280,
+      "overflowX": false
+    },
+    "tablet_768x1024": {
+      "scrollWidth": 768,
+      "clientWidth": 768,
+      "overflowX": false
+    },
+    "mobile_390x844": {
+      "scrollWidth": 390,
+      "clientWidth": 390,
+      "overflowX": false
+    },
+    "mobile_360x740": {
+      "scrollWidth": 360,
+      "clientWidth": 360,
+      "overflowX": false
+    }
+  },
+  "touch_targets": {
+    "total_elements": 76,
+    "small_targets": [
+      {
+        "tag": "INPUT",
+        "cls": "custom-threshold-input",
+        "text": "",
+        "width": 58,
+        "height": 36
+      },
+      {
+        "tag": "INPUT",
+        "cls": "",
+        "text": "",
+        "width": 201,
+        "height": 14
+      },
+      {
+        "tag": "DIV",
+        "cls": "status-badge-chip chip-active",
+        "text": "ACTIVE",
+        "width": 66,
+        "height": 24
+      },
+      {
+        "tag": "SPAN",
+        "cls": "status-badge-chip",
+        "text": "\u2713\nPAID",
+        "width": 49,
+        "height": 15
+      },
+      {
+        "tag": "DIV",
+        "cls": "status-badge-chip chip-review",
+        "text": "\u23f3 UNDER REVIEW",
+        "width": 96,
+        "height": 38
+      },
+      {
+        "tag": "SPAN",
+        "cls": "status-badge-chip",
+        "text": "\u26a1\nIN PROGRESS",
+        "width": 96,
+        "height": 15
+      },
+      {
+        "tag": "DIV",
+        "cls": "status-badge-chip chip-review",
+        "text": "\u23f3 UNDER REVIEW",
+        "width": 96,
+        "height": 38
+      },
+      {
+        "tag": "SPAN",
+        "cls": "status-badge-chip",
+        "text": "\u23f3\nUNDER REVIEW",
+        "width": 107,
+        "height": 15
+      },
+      {
+        "tag": "DIV",
+        "cls": "status-badge-chip chip-active",
+        "text": "ACTIVE",
+        "width": 66,
+        "height": 24
+      },
+      {
+        "tag": "SPAN",
+        "cls": "status-badge-chip",
+        "text": "\u26a0\ufe0f\nPAYMENT ERROR",
+        "width": 113,
+        "height": 15
+      }
+    ]
+  },
+  "views": {
+    "desktop_1440x900_matrix": "/root/projects/luckywatch-bot/qa_artifacts/payout_vp_desktop_1440x900_matrix.png",
+    "tablet_768x1024_matrix": "/root/projects/luckywatch-bot/qa_artifacts/payout_vp_tablet_768x1024_matrix.png",
+    "mobile_390x844_matrix": "/root/projects/luckywatch-bot/qa_artifacts/payout_vp_mobile_390x844_matrix.png",
+    "dual_view_4chips_grid": "/root/projects/luckywatch-bot/qa_artifacts/payout_dual_view_4chips_grid.png",
+    "dual_view_4chips_matrix": "/root/projects/luckywatch-bot/qa_artifacts/payout_dual_view_4chips_matrix.png",
+    "dual_view_4chips_mobile": "/root/projects/luckywatch-bot/qa_artifacts/payout_dual_view_4chips_mobile.png"
+  }
+}
