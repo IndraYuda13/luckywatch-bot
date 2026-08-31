@@ -1253,6 +1253,7 @@
 
   <script>
     /* STATE MANAGEMENT */
+    const DASHBOARD_API_KEY = "__DASHBOARD_API_KEY__";
     let globalState = null;
     let selectedThreshold = 0.10;
     let accountFilter = 'all';
@@ -1733,7 +1734,13 @@
     /* ACTIONS & TOASTS */
     async function triggerAction(actionName) {
       try {
-        const res = await fetch(`/api/actions/${actionName}`, { method: 'POST' });
+        const res = await fetch(`/api/actions/${actionName}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Dashboard-Key': DASHBOARD_API_KEY
+          }
+        });
         const result = await res.json();
         showToast(result.message || `Action ${actionName} executed`);
         fetchStats();
