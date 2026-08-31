@@ -42,6 +42,7 @@ CONFIG_FILE = Path("/root/projects/luckywatch-bot/config.json")
 STATE_FILE = Path("/root/projects/luckywatch-bot/state/sessions.json")
 FLEET_STATE_FILE = Path("/root/projects/luckywatch-bot/state/fleet_state.json")
 LOG_FILE = Path("/root/projects/luckywatch-bot/bot.log")
+DASHBOARD_TEMPLATE_FILE = Path("/root/projects/luckywatch-bot/dashboard_template.html")
 
 _SERVER_WRITE_LOCK = threading.Lock()
 
@@ -445,8 +446,8 @@ def get_latest_stats() -> dict:
                 except Exception:
                     pass
 
-            # Fetch last payout history
             last_payout = None
+            payout_status_label = None
             try:
                 req_p = urllib.request.Request(
                     "https://luckywatch.pro/api/user/payout/",
@@ -460,9 +461,17 @@ def get_latest_stats() -> dict:
                 with opener.open(req_p, timeout=2.5) as res:
                     p_res = json.loads(res.read().decode("utf-8"))
                     if p_res.get("status") == "ok":
-                        items = p_res.get("data", {}).get("items", [])
+                        # Upstream response structure is {'history': {'data': [...], 'meta': ...}}
+                        items = p_res.get("data", {}).get("history", {}).get("data", [])
+                        if not items:
+                            items = p_res.get("data", {}).get("items", [])
                         if items:
-                            first = items[0]
+                            sorted_items = sorted(
+                                items,
+                                key=lambda x: int(x.get("unixtime", 0) or x.get("id", 0)),
+                                reverse=True
+                            )
+                            first = sorted_items[0]
                             st_code = str(first.get("status", ""))
                             status_map = {
                                 "0": "PAYMENT ERROR",
@@ -471,18 +480,38 @@ def get_latest_stats() -> dict:
                                 "3": "UNDER REVIEW"
                             }
                             st_label = status_map.get(st_code, f"CODE_{st_code}")
+                            payout_status_label = st_label
                             ts_val = int(first.get("unixtime", 0))
                             dt_str = datetime.fromtimestamp(ts_val).strftime("%Y-%m-%d %H:%M") if ts_val > 0 else "-"
                             last_payout = {
-                                "id": first.get("id"),
+                                "id": str(first.get("id", "")),
                                 "amount": str(first.get("val", "0.00000")),
                                 "net_amount": str(first.get("commissionVal", "0.00000")),
                                 "wallet": first.get("account", ""),
                                 "status": st_label,
+                                "status_code": st_code,
                                 "timestamp": dt_str
                             }
             except Exception:
                 pass
+
+            # Sync payout status back to fleet_state if known
+            if payout_status_label and FLEET_STATE_FILE.exists():
+                try:
+                    with _SERVER_WRITE_LOCK:
+                        f_st = json.loads(FLEET_STATE_FILE.read_text(encoding="utf-8"))
+                        if email in f_st:
+                            f_st[email]["payout_status"] = payout_status_label
+                            if payout_status_label in ("UNDER REVIEW", "IN PROGRESS"):
+                                f_st[email]["payout_under_review"] = True
+                            elif payout_status_label in ("PAID", "PAYMENT ERROR"):
+                                f_st[email]["payout_under_review"] = False
+                            FLEET_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                            tmp_path = FLEET_STATE_FILE.with_name(f"{FLEET_STATE_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+                            tmp_path.write_text(json.dumps(f_st, indent=2) + "\n", encoding="utf-8")
+                            os.replace(tmp_path, FLEET_STATE_FILE)
+                except Exception:
+                    pass
 
             return email, {
                 "balance": bal_val,
@@ -602,6 +631,14 @@ def get_latest_stats() -> dict:
         # Use last_payout from fetch or cache (avoid redundant blocking sequential requests)
         last_payout = last_fetch.get("last_payout")
 
+        # Extract payout state from fleet_st or last_payout
+        payout_under_rev = bool(fleet_st.get("payout_under_review", False))
+        payout_st = fleet_st.get("payout_status", "IDLE")
+        payout_backoff = float(fleet_st.get("payout_backoff_until", 0.0))
+        if last_payout and last_payout.get("status") in ("UNDER REVIEW", "IN PROGRESS"):
+            payout_under_rev = True
+            payout_st = "UNDER_REVIEW"
+
         acc_obj = {
             "email": email,
             "email_redacted": redacted,
@@ -625,6 +662,9 @@ def get_latest_stats() -> dict:
             "hourly_cap": live_st.get("hourly_cap", 65),
             "current_task": task_dict,
             "last_payout": last_payout,
+            "payout_status": payout_st,
+            "payout_under_review": payout_under_rev,
+            "payout_backoff_until": payout_backoff,
             "countdown_sleep": live_st.get("countdown_sleep", 0),
             "error_reason": live_st.get("error_reason"),
             "last_activity_time": live_st.get("last_activity_time", "-"),
@@ -647,6 +687,7 @@ def get_latest_stats() -> dict:
     active_workers = len([a for a in accounts_list if a["status"] == "ACTIVE"])
     sleeping_workers = len([a for a in accounts_list if a["status"] == "SLEEPING"])
     error_workers = len([a for a in accounts_list if a["status"] == "ERROR"])
+    under_review_count = len([a for a in accounts_list if a.get("payout_status") in ("UNDER_REVIEW", "UNDER REVIEW", "IN_PROGRESS", "IN PROGRESS") or a.get("payout_under_review") or (a.get("last_payout") and a["last_payout"].get("status") in ("UNDER REVIEW", "IN PROGRESS", "3", "2"))])
 
     summary = {
         "total_balance": f"{total_balance:.7f}",
@@ -655,6 +696,7 @@ def get_latest_stats() -> dict:
         "active_workers": active_workers,
         "sleeping_workers": sleeping_workers,
         "error_workers": error_workers,
+        "under_review_count": under_review_count,
         "total_tasks_today": total_tasks_today,
     }
 
@@ -688,6 +730,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>LuckyWatch Fleet Telemetry & Withdrawal Hub</title>
+  <!-- Inline SVG Favicon (Emerald Clover) to prevent 404 console errors -->
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%2310B981'%3E%3Cpath d='M12 3a3 3 0 0 0-3 3c0 1.1.6 2.1 1.5 2.6C9.6 9 8.6 8.5 7.5 8.5a3.5 3.5 0 0 0-3.5 3.5 3.5 3.5 0 0 0 3.5 3.5c1.1 0 2.1-.5 2.6-1.4-.4.9-.6 1.9-.6 3 0 1.9 1.6 3.5 3.5 3.5s3.5-1.6 3.5-3.5c0-1.1-.2-2.1-.6-3 .5.9 1.5 1.4 2.6 1.4a3.5 3.5 0 0 0 3.5-3.5 3.5 3.5 0 0 0-3.5-3.5c-1.1 0-2.1.5-2.6 1.4.9-.5 1.5-1.5 1.5-2.6a3 3 0 0 0-3-3z'/%3E%3C/svg%3E" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
@@ -704,6 +748,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       --surface-glass-hover: rgba(30, 41, 59, 0.85);
       --border-subtle: rgba(255, 255, 255, 0.06);
       --border-medium: rgba(255, 255, 255, 0.12);
+      --border-focus: rgba(56, 189, 248, 0.5);
       
       --emerald: #10B981;
       --emerald-bright: #34D399;
@@ -725,9 +770,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       --gold-gradient: linear-gradient(135deg, #FDE047 0%, #CA8A04 100%);
       --gold-glow: rgba(234, 179, 8, 0.35);
 
-      --text-main: #F8FAFC;
-      --text-secondary: #94A3B8;
-      --text-tertiary: #64748B;
+      --text-main: #FFFFFF;
+      --text-secondary: #CBD5E1;
+      /* WCAG AA compliant tertiary text contrast (>4.8:1 against dark backgrounds) */
+      --text-tertiary: #94A3B8;
       --text-code: #E2E8F0;
 
       --radius-sm: 8px;
@@ -934,6 +980,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       overflow: hidden;
       box-shadow: var(--shadow-card);
       transition: border-color 0.2s, transform 0.2s;
+      contain: content;
     }
 
     .hud-card:hover {
@@ -1100,7 +1147,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     .withdraw-overview-metrics {
       display: grid;
-      grid-template-columns: 1.4fr 1fr 1fr;
+      grid-template-columns: 1.3fr 0.9fr 0.8fr 0.8fr auto;
       gap: 16px;
       align-items: center;
       background: rgba(0, 0, 0, 0.25);
@@ -1109,7 +1156,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       padding: 16px 20px;
     }
 
-    @media (max-width: 860px) {
+    @media (max-width: 1100px) {
+      .withdraw-overview-metrics {
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+      }
+    }
+
+    @media (max-width: 640px) {
       .withdraw-overview-metrics {
         grid-template-columns: 1fr;
         gap: 16px;
@@ -1280,6 +1334,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       gap: 16px;
     }
 
+    /* DOM Containment on Account Cards & Log Streams to prevent full-page reflows */
     .account-card {
       background: var(--surface-1);
       border: 1px solid var(--border-subtle);
@@ -1292,6 +1347,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       position: relative;
       overflow: hidden;
       transition: border-color 0.2s, transform 0.2s;
+      contain: content;
     }
 
     .account-card:hover {
@@ -1351,9 +1407,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       border: none;
       color: var(--text-tertiary);
       cursor: pointer;
-      padding: 2px;
+      padding: 4px;
       display: inline-flex;
       align-items: center;
+      justify-content: center;
       transition: color 0.15s;
     }
 
@@ -1362,8 +1419,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     .copy-btn svg {
-      width: 13px;
-      height: 13px;
+      width: 14px;
+      height: 14px;
       stroke: currentColor;
       stroke-width: 2;
       fill: none;
@@ -1376,6 +1433,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       align-items: center;
       gap: 4px;
       margin-top: 1px;
+      flex-wrap: wrap;
     }
 
     .status-badge-chip {
@@ -1406,6 +1464,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       background: rgba(244, 63, 94, 0.12);
       border: 1px solid rgba(244, 63, 94, 0.3);
       color: var(--rose-bright);
+    }
+
+    .chip-review {
+      background: rgba(245, 158, 11, 0.18);
+      border: 1px solid rgba(245, 158, 11, 0.55);
+      color: #FDE047;
+      box-shadow: 0 0 10px rgba(245, 158, 11, 0.2);
     }
 
     .balances-row {
@@ -1501,6 +1566,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       color: var(--text-tertiary);
       border-top: 1px solid var(--border-subtle);
       padding-top: 10px;
+      gap: 8px;
     }
 
     /* DENSE MATRIX TABLE VIEW */
@@ -1547,7 +1613,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       background: rgba(255, 255, 255, 0.02);
     }
 
-    /* TERMINAL LOG STREAM PANEL */
+    /* TERMINAL LOG STREAM PANEL WITH DOM CONTAINMENT */
     .terminal-panel {
       background: #05070B;
       border: 1px solid var(--border-medium);
@@ -1557,6 +1623,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       flex-direction: column;
       gap: 14px;
       box-shadow: var(--shadow-hud);
+      contain: content;
     }
 
     .terminal-top-nav {
@@ -1618,7 +1685,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       outline: none;
     }
 
-    .terminal-view-window {
+    /* Bounded Terminal Stream Window with strict DOM containment */
+    .terminal-view-window, #log-stream {
       background: #020306;
       border: 1px solid rgba(255, 255, 255, 0.04);
       border-radius: var(--radius-md);
@@ -1630,6 +1698,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       line-height: 1.6;
       color: var(--text-code);
       position: relative;
+      contain: content;
     }
 
     .t-log-entry {
@@ -1647,32 +1716,95 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .t-log-error { color: var(--rose-bright); }
     .t-log-info { color: var(--text-secondary); }
 
-    /* TOAST FEEDBACK */
+    /* STATE-AWARE TOAST FEEDBACK */
     .toast-container {
       position: fixed;
       bottom: 24px;
       right: 24px;
-      z-index: 1000;
+      z-index: 10000;
       display: flex;
       flex-direction: column;
-      gap: 8px;
+      gap: 10px;
+      pointer-events: none;
     }
 
     .toast-msg {
+      pointer-events: auto;
+      min-width: 260px;
+      max-width: 420px;
       background: rgba(15, 23, 42, 0.95);
-      border: 1px solid var(--emerald);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      padding: 12px 18px;
+      border-radius: var(--radius-md);
+      font-size: 12.5px;
+      font-weight: 500;
+      line-height: 1.4;
       color: #FFFFFF;
-      padding: 10px 16px;
-      border-radius: var(--radius-sm);
-      font-size: 12px;
-      box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.1);
       display: flex;
       align-items: center;
-      gap: 8px;
-      animation: slideIn 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      gap: 10px;
+      animation: toastSlideIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+      transition: all 0.25s ease;
+      border: 1px solid var(--border-medium);
     }
 
-    @keyframes slideIn {
+    .toast-msg.toast-success {
+      border-color: rgba(16, 185, 129, 0.6);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 0 16px rgba(16, 185, 129, 0.25);
+    }
+    .toast-msg.toast-success svg {
+      stroke: var(--emerald-bright);
+    }
+
+    .toast-msg.toast-error {
+      border-color: rgba(244, 63, 94, 0.6);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 0 16px rgba(244, 63, 94, 0.25);
+    }
+    .toast-msg.toast-error svg {
+      stroke: var(--rose-bright);
+    }
+
+    .toast-msg.toast-warning {
+      border-color: rgba(245, 158, 11, 0.6);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 0 16px rgba(245, 158, 11, 0.25);
+    }
+    .toast-msg.toast-warning svg {
+      stroke: var(--amber-bright);
+    }
+
+    .toast-msg.toast-info {
+      border-color: rgba(56, 189, 248, 0.6);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 0 16px rgba(56, 189, 248, 0.25);
+    }
+    .toast-msg.toast-info svg {
+      stroke: var(--cyan);
+    }
+
+    .toast-icon {
+      flex-shrink: 0;
+      width: 18px;
+      height: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .toast-icon svg {
+      width: 18px;
+      height: 18px;
+      fill: none;
+      stroke-width: 2.2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .toast-text {
+      flex: 1;
+      word-break: break-word;
+    }
+
+    @keyframes toastSlideIn {
       from { transform: translateX(100%); opacity: 0; }
       to { transform: translateX(0); opacity: 1; }
     }
@@ -1683,16 +1815,137 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.12); border-radius: 3px; }
     ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); }
 
-    /* RESPONSIVE BREAKPOINTS */
+    /* RESPONSIVE BREAKPOINTS & MOBILE TOUCH TARGET ERGONOMICS */
     @media (max-width: 640px) {
-      body { padding: 12px 8px 30px; }
-      .brand-text h1 { font-size: 16px; }
-      .hud-grid { grid-template-columns: 1fr; }
-      .accounts-grid-view { grid-template-columns: 1fr; }
-      .search-input-wrap { width: 100%; }
-      .search-input-wrap:focus-within { width: 100%; }
-      .controls-bar { flex-direction: column; align-items: stretch; }
-      .right-tools { justify-content: space-between; }
+      body {
+        padding: 12px 8px 36px;
+      }
+      .brand-text h1 {
+        font-size: 16px;
+      }
+      .header-bar {
+        padding: 14px 16px;
+        gap: 12px;
+      }
+      .header-controls {
+        width: 100%;
+        justify-content: flex-start;
+        gap: 8px;
+      }
+      .hud-grid {
+        grid-template-columns: 1fr;
+        gap: 12px;
+      }
+      .accounts-grid-view {
+        grid-template-columns: 1fr;
+        gap: 14px;
+      }
+      .controls-bar {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 14px;
+        padding: 14px;
+      }
+      .filter-tabs {
+        gap: 8px;
+        width: 100%;
+      }
+      .right-tools {
+        width: 100%;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .search-input-wrap {
+        flex: 1;
+        width: auto;
+        min-height: 44px;
+      }
+      .search-input-wrap:focus-within {
+        width: auto;
+      }
+      .threshold-selector {
+        width: 100%;
+        gap: 8px;
+      }
+
+      /* Minimum 44x44px Touch Target Optimization */
+      .copy-btn {
+        min-width: 44px;
+        min-height: 44px;
+        padding: 10px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .copy-btn svg {
+        width: 16px;
+        height: 16px;
+      }
+      .btn-action {
+        min-height: 44px;
+        min-width: 44px;
+        padding: 10px 14px;
+        font-size: 12px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .preset-pill {
+        min-height: 44px;
+        min-width: 44px;
+        padding: 10px 14px;
+        font-size: 12px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .filter-tab-btn {
+        min-height: 44px;
+        min-width: 44px;
+        padding: 10px 14px;
+        font-size: 12px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .t-tab-btn {
+        min-height: 44px;
+        min-width: 44px;
+        padding: 10px 14px;
+        font-size: 12px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .view-btn {
+        min-width: 44px;
+        min-height: 44px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .custom-threshold-wrap {
+        min-height: 44px;
+        padding: 4px 10px;
+      }
+      .custom-threshold-input {
+        min-height: 36px;
+        font-size: 13px;
+      }
+      .log-level-select {
+        min-height: 44px;
+        padding: 8px 12px;
+        font-size: 12px;
+      }
+      .toast-container {
+        left: 12px;
+        right: 12px;
+        bottom: 16px;
+      }
+      .toast-msg {
+        min-width: unset;
+        width: 100%;
+      }
     }
   </style>
 </head>
@@ -1846,6 +2099,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <div class="mono tabular" id="accounts-ready-count" style="font-size: 20px; font-weight: 800; color: #FFFFFF;">0 / 2 Accounts</div>
         </div>
 
+        <div style="display: flex; flex-direction: column; gap: 4px; padding-left: 10px; border-left: 1px solid var(--border-subtle);">
+          <span style="font-size: 11px; color: var(--text-tertiary); text-transform: uppercase; font-weight: 700;">Under Review</span>
+          <div class="mono tabular" id="accounts-review-count" style="font-size: 20px; font-weight: 800; color: #FDE047;" title="Accounts with pending payout review by LuckyWatch">0 Accounts</div>
+        </div>
+
         <div style="display: flex; align-items: center; padding-left: 10px; border-left: 1px solid var(--border-subtle);">
           <button class="btn-action" id="btn-withdraw-all" style="background: var(--gold-gradient); color: #000; font-weight: 800; font-size: 12px; padding: 8px 14px; border: none; box-shadow: 0 0 15px var(--gold-glow);" onclick="triggerWithdrawAll()">
             ⚡ Auto Withdraw All Ready
@@ -1896,6 +2154,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               <th>Balance (USD)</th>
               <th>Clovers</th>
               <th>Withdraw Goal</th>
+              <th>Last Payout</th>
               <th>Daily Quota</th>
               <th>Hourly Progress</th>
               <th>Live Activity</th>
@@ -1909,7 +2168,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </main>
 
-    <!-- MULTI-CHANNEL LOG TERMINAL -->
+    <!-- MULTI-CHANNEL LOG TERMINAL (FIFO BUFFER & DOM CONTAINMENT) -->
     <section class="terminal-panel">
       <div class="terminal-top-nav">
         <div class="terminal-tabs" id="terminal-channel-tabs">
@@ -1937,7 +2196,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
       </div>
 
-      <div class="terminal-view-window" id="terminal-stream-window">
+      <div class="terminal-view-window" id="terminal-stream-window" data-testid="log-stream">
         <div style="color: var(--text-tertiary);">Connecting to LuckyWatch telemetry stream...</div>
       </div>
     </section>
@@ -1982,11 +2241,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
 
   <!-- TOAST CONTAINER -->
-  <div class="toast-container" id="toast-container"></div>
+  <div class="toast-container" id="toast-container" aria-live="polite"></div>
 
   <script>
     /* STATE MANAGEMENT */
     const DASHBOARD_API_KEY = "__DASHBOARD_API_KEY__";
+    const MAX_DOM_LOG_NODES = 200; // Sliding window FIFO buffer cap
     let globalState = null;
     let selectedThreshold = 0.10;
     let accountFilter = 'all';
@@ -1996,6 +2256,46 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     let logLevelFilter = 'ALL';
     let autoScrollEnabled = true;
     let currentModalEmail = '';
+
+    /* TOAST ICONS & ENGINE */
+    const TOAST_ICONS = {
+      success: `<svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>`,
+      error: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`,
+      warning: `<svg viewBox="0 0 24 24"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`,
+      info: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>`
+    };
+
+    function showToast(msg, type = 'info') {
+      const normType = ['success', 'error', 'warning', 'info'].includes(type) ? type : 'info';
+      const container = document.getElementById('toast-container');
+      if (!container) return;
+
+      const toast = document.createElement('div');
+      toast.className = `toast-msg toast-${normType}`;
+      toast.setAttribute('role', 'alert');
+      toast.setAttribute('data-toast-type', normType);
+      
+      const iconSvg = TOAST_ICONS[normType] || TOAST_ICONS.info;
+      toast.innerHTML = `
+        <div class="toast-icon">${iconSvg}</div>
+        <div class="toast-text">${escapeHtml(msg)}</div>
+      `;
+      
+      container.appendChild(toast);
+      
+      // Cap visible toasts to max 5
+      while (container.children.length > 5) {
+        container.removeChild(container.firstChild);
+      }
+
+      setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateY(10px)';
+        setTimeout(() => {
+          if (toast.parentNode) toast.remove();
+        }, 250);
+      }, 3500);
+    }
 
     /* INITIALIZATION FUNCTION */
     function initDashboard() {
@@ -2046,7 +2346,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       document.getElementById('custom-threshold-input').value = '';
       updateThresholdUI();
       if (globalState) renderAll();
-      showToast(`Withdrawal threshold set to $${selectedThreshold.toFixed(2)} USD`);
+      showToast(`Withdrawal threshold set to $${selectedThreshold.toFixed(2)} USD`, 'info');
     }
 
     function handleCustomThreshold(val) {
@@ -2056,7 +2356,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         localStorage.setItem('lw_withdraw_threshold', selectedThreshold.toString());
         updateThresholdUI();
         if (globalState) renderAll();
-        showToast(`Custom threshold set to $${selectedThreshold.toFixed(2)} USD`);
+        showToast(`Custom threshold set to $${selectedThreshold.toFixed(2)} USD`, 'info');
       }
     }
 
@@ -2124,6 +2424,67 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       renderLogs();
     }
 
+    /* HELPER: GET PAYOUT BADGE STYLING & STATUS MAPPING */
+    function getPayoutBadge(lastPayout) {
+      if (!lastPayout) {
+        return {
+          label: 'NO PAYOUT',
+          color: 'var(--text-tertiary)',
+          bg: 'rgba(255, 255, 255, 0.03)',
+          border: 'rgba(255, 255, 255, 0.08)',
+          icon: '•'
+        };
+      }
+
+      const code = String(lastPayout.status_code || '');
+      const status = String(lastPayout.status || '').toUpperCase();
+
+      if (code === '1' || status === 'PAID') {
+        return {
+          label: 'PAID',
+          color: 'var(--emerald-bright)',
+          bg: 'rgba(16, 185, 129, 0.12)',
+          border: 'rgba(16, 185, 129, 0.35)',
+          icon: '✓'
+        };
+      }
+      if (code === '2' || status === 'IN PROGRESS') {
+        return {
+          label: 'IN PROGRESS',
+          color: 'var(--cyan)',
+          bg: 'rgba(56, 189, 248, 0.12)',
+          border: 'rgba(56, 189, 248, 0.35)',
+          icon: '⏳'
+        };
+      }
+      if (code === '3' || status === 'UNDER REVIEW') {
+        return {
+          label: 'UNDER REVIEW',
+          color: 'var(--amber-bright)',
+          bg: 'rgba(245, 158, 11, 0.12)',
+          border: 'rgba(245, 158, 11, 0.35)',
+          icon: '🔍'
+        };
+      }
+      if (code === '0' || status === 'PAYMENT ERROR') {
+        return {
+          label: 'PAYMENT ERROR',
+          color: 'var(--rose-bright)',
+          bg: 'rgba(244, 63, 94, 0.12)',
+          border: 'rgba(244, 63, 94, 0.35)',
+          icon: '⚠️'
+        };
+      }
+
+      return {
+        label: status || 'UNKNOWN',
+        color: 'var(--text-secondary)',
+        bg: 'rgba(255, 255, 255, 0.05)',
+        border: 'var(--border-subtle)',
+        icon: '•'
+      };
+    }
+
     /* HUD RENDERING */
     function renderHUD(data) {
       const s = data.summary || {};
@@ -2175,6 +2536,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
       const readyAccounts = accounts.filter(a => parseFloat(a.balance) >= target);
       document.getElementById('accounts-ready-count').textContent = `${readyAccounts.length} / ${accounts.length} Accounts`;
+
+      const reviewCount = accounts.filter(a => a.payout_status === 'UNDER_REVIEW' || a.payout_status === 'UNDER REVIEW' || a.payout_under_review || (a.last_payout && ['UNDER REVIEW', 'IN PROGRESS', '3', '2'].includes(a.last_payout.status))).length;
+      const reviewEl = document.getElementById('accounts-review-count');
+      if (reviewEl) {
+        reviewEl.textContent = `${reviewCount} Account${reviewCount === 1 ? '' : 's'}`;
+        reviewEl.style.color = reviewCount > 0 ? '#FDE047' : 'var(--text-tertiary)';
+      }
 
       const verdictEl = document.getElementById('readiness-verdict-box');
       if (readyAccounts.length > 0) {
@@ -2239,9 +2607,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const dailyPct = Math.min(100, Math.round((acc.daily_done / (acc.daily_cap || 560)) * 100));
         const hourlyPct = Math.min(100, Math.round((acc.hourly_done / (acc.hourly_cap || 65)) * 100));
 
+        const isUnderReview = acc.payout_status === 'UNDER_REVIEW' || acc.payout_status === 'UNDER REVIEW' || Boolean(acc.payout_under_review) || (acc.last_payout && ['UNDER REVIEW', 'IN PROGRESS', '3', '2'].includes(acc.last_payout.status));
+        const reviewTooltip = "Payout is currently under review by LuckyWatch. Auto-withdraw paused.";
+
         let chipClass = 'chip-active';
         let statusText = acc.status;
-        if (acc.status === 'SLEEPING') {
+        if (isUnderReview) {
+          chipClass = 'chip-review';
+          statusText = '⏳ UNDER REVIEW';
+        } else if (acc.status === 'SLEEPING') {
           chipClass = 'chip-sleeping';
           if (acc.countdown_sleep > 0) statusText = `SLEEP (${acc.countdown_sleep}s)`;
         } else if (acc.status === 'ERROR') {
@@ -2278,7 +2652,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                   </div>
                 </div>
               </div>
-              <div class="status-badge-chip ${chipClass}">
+              <div class="status-badge-chip ${chipClass}" ${isUnderReview ? `title="${reviewTooltip}" style="cursor: help;"` : ''}>
                 ${statusText}
               </div>
             </div>
@@ -2334,16 +2708,30 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               <span class="mono" style="font-size: 10px; color: var(--text-tertiary);">${acc.last_activity_time}</span>
             </div>
 
-            ${acc.last_payout ? `
-              <div style="background: rgba(16, 185, 129, 0.08); border: 1px dashed rgba(16, 185, 129, 0.3); border-radius: 8px; padding: 6px 10px; display: flex; justify-content: space-between; align-items: center; font-size: 11px;">
-                <div style="display: flex; align-items: center; gap: 6px;">
-                  <span>🎉</span>
-                  <span class="mono" style="font-weight: 700; color: var(--emerald-bright);">$${acc.last_payout.amount} USD</span>
-                  <span class="status-badge-chip chip-active" style="padding: 2px 6px; font-size: 9.5px;">${acc.last_payout.status}</span>
+            ${(() => {
+              if (!acc.last_payout) return '';
+              const pStyle = getPayoutBadge(acc.last_payout);
+              const pId = acc.last_payout.id ? `#${acc.last_payout.id}` : '';
+              const pTime = acc.last_payout.timestamp || '';
+              const pNet = acc.last_payout.net_amount ? ` (Net: $${acc.last_payout.net_amount})` : '';
+              const tooltip = `Payout ${pId} | Status: ${pStyle.label} | Wallet: ${acc.last_payout.wallet || '-'}${pNet}`;
+
+              return `
+                <div class="payout-card-strip" style="background: ${pStyle.bg}; border: 1px solid ${pStyle.border}; border-radius: var(--radius-sm); padding: 7px 10px; display: flex; justify-content: space-between; align-items: center; font-size: 11px; margin-top: 4px;" title="${tooltip}">
+                  <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                    <span>${pStyle.icon}</span>
+                    <span class="mono tabular" style="font-weight: 700; color: ${pStyle.color};">$${acc.last_payout.amount} USD</span>
+                    <span class="status-badge-chip" style="background: ${pStyle.bg}; border: 1px solid ${pStyle.border}; color: ${pStyle.color}; padding: 1px 6px; font-size: 9.5px; border-radius: var(--radius-full); text-transform: uppercase;">
+                      ${pStyle.label}
+                    </span>
+                  </div>
+                  <div style="display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--text-tertiary);" class="mono">
+                    ${pId ? `<span>${pId}</span><span>•</span>` : ''}
+                    <span>${pTime.split(' ')[1] || pTime}</span>
+                  </div>
                 </div>
-                <span class="mono" style="font-size: 10px; color: var(--text-tertiary);">${acc.last_payout.timestamp.split(' ')[1] || ''}</span>
-              </div>
-            ` : ''}
+              `;
+            })()}
 
             <div class="card-footer-actions">
               <div style="display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0;">
@@ -2354,7 +2742,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               <div style="display: flex; gap: 6px;">
                 ${!acc.email_verified ? `<button class="btn-action" style="padding: 3px 8px; font-size: 10.5px; background: rgba(245,158,11,0.15); color: #FBBF24; border: 1px solid rgba(245,158,11,0.3);" onclick="sendEmailVerify('${acc.email}')" title="Send email verification code">📩 Verif</button>` : ''}
                 <button class="btn-action" style="padding: 3px 8px; font-size: 10.5px;" onclick="openWalletModal('${acc.email}', '${acc.faucetpay_usdt_trc20 || ''}')" title="Configure Wallet">⚙️</button>
-                <button class="btn-action ${isReady && acc.faucetpay_usdt_trc20 ? 'gold-tier' : ''}" style="padding: 3px 8px; font-size: 10.5px; ${isReady && acc.faucetpay_usdt_trc20 ? 'background: var(--gold-gradient); color: #000; font-weight: 700;' : ''}" onclick="triggerWithdraw('${acc.email}')" ${!acc.faucetpay_usdt_trc20 || !isReady ? 'disabled title=\"Wallet not set or balance below threshold\"' : 'title=\"Withdraw to FaucetPay USDT TRC20\"'}>💸 Payout</button>
+                <button class="btn-action ${isReady && acc.faucetpay_usdt_trc20 && !isUnderReview ? 'gold-tier' : ''}" style="padding: 3px 8px; font-size: 10.5px; ${isReady && acc.faucetpay_usdt_trc20 && !isUnderReview ? 'background: var(--gold-gradient); color: #000; font-weight: 700;' : ''} ${isUnderReview ? 'opacity: 0.6; cursor: not-allowed;' : ''}" onclick="triggerWithdraw('${acc.email}')" ${!acc.faucetpay_usdt_trc20 || !isReady || isUnderReview ? `disabled title="${isUnderReview ? 'Payout is currently under review by LuckyWatch. Auto-withdraw paused.' : 'Wallet not set or balance below threshold'}"` : 'title=\"Withdraw to FaucetPay USDT TRC20\"'}>${isUnderReview ? '⏳ In Review' : '💸 Payout'}</button>
                 <button class="btn-action" style="padding: 3px 8px; font-size: 10.5px;" onclick="focusAccountLogs('${acc.email_redacted}')">Logs</button>
               </div>
             </div>
@@ -2366,7 +2754,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     function renderMatrixTable(accounts) {
       const tbody = document.getElementById('matrix-tbody');
       if (accounts.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="10" style="text-align: center; color: var(--text-tertiary); padding: 30px;">No accounts match the current filter.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="11" style="text-align: center; color: var(--text-tertiary); padding: 30px;">No accounts match the current filter.</td></tr>`;
         return;
       }
 
@@ -2376,9 +2764,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const withdrawPct = Math.min(100, Math.round((bal / selectedThreshold) * 100));
         const flag = acc.country === 'ID' ? '🇮🇩' : (acc.country === 'SG' ? '🇸🇬' : '🌐');
 
+        const isUnderReview = acc.payout_status === 'UNDER_REVIEW' || acc.payout_status === 'UNDER REVIEW' || Boolean(acc.payout_under_review) || (acc.last_payout && ['UNDER REVIEW', 'IN PROGRESS', '3', '2'].includes(acc.last_payout.status));
+        const reviewTooltip = "Payout is currently under review by LuckyWatch. Auto-withdraw paused.";
+
         let chipClass = 'chip-active';
         let statusText = acc.status;
-        if (acc.status === 'SLEEPING') {
+        if (isUnderReview) {
+          chipClass = 'chip-review';
+          statusText = '⏳ UNDER REVIEW';
+        } else if (acc.status === 'SLEEPING') {
           chipClass = 'chip-sleeping';
           if (acc.countdown_sleep > 0) statusText = `SLEEP (${acc.countdown_sleep}s)`;
         } else if (acc.status === 'ERROR') {
@@ -2399,24 +2793,42 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 </button>
               </div>
             </td>
-            <td><span class="status-badge-chip ${chipClass}">${statusText}</span></td>
+            <td><span class="status-badge-chip ${chipClass}" ${isUnderReview ? `title="${reviewTooltip}" style="cursor: help;"` : ''}>${statusText}</span></td>
             <td><span class="mono">${flag} ${acc.country} • ${acc.egress_ip}</span></td>
             <td><span class="mono tabular" style="color: var(--emerald-bright); font-weight: 700;">$${acc.balance}</span></td>
             <td><span class="mono tabular" style="color: var(--amber-bright); font-weight: 700;">${Number(acc.clovers).toLocaleString()}</span></td>
             <td>
-              <div style="display: flex; align-items: center; gap: 6px;">
-                <span class="mono" style="font-size: 11px; color: ${acc.faucetpay_usdt_trc20 ? 'var(--emerald-bright)' : 'var(--text-tertiary)'}; cursor: pointer; text-decoration: underline dotted;" onclick="openWalletModal('${acc.email}', '${acc.faucetpay_usdt_trc20 || ''}')">
-                  ${acc.faucetpay_usdt_trc20 ? acc.faucetpay_usdt_trc20.slice(0, 4) + '...' + acc.faucetpay_usdt_trc20.slice(-4) : '⚠️ Set Wallet'}
-                </span>
-              </div>
-            </td>
-            <td>
-              <div style="display: flex; align-items: center; gap: 8px; width: 100px;">
+              <div style="display: flex; align-items: center; gap: 8px; width: 90px;">
                 <div class="mini-progress" style="flex: 1;">
                   <div class="mini-progress-fill" style="width: ${withdrawPct}%; ${isReady ? 'background: var(--gold-gradient);' : ''}"></div>
                 </div>
                 <span class="mono tabular" style="font-size: 11px; color: ${isReady ? '#FDE047' : 'var(--text-secondary)'};">${withdrawPct}%</span>
               </div>
+            </td>
+            <td>
+              ${(() => {
+                if (!acc.last_payout) {
+                  return `<span style="color: var(--text-tertiary); font-size: 11px;">-</span>`;
+                }
+                const pStyle = getPayoutBadge(acc.last_payout);
+                const pId = acc.last_payout.id ? `#${acc.last_payout.id}` : '';
+                const pTime = acc.last_payout.timestamp || '';
+                const tooltip = `ID: ${pId} | Wallet: ${acc.last_payout.wallet || '-'} | Time: ${pTime}`;
+
+                return `
+                  <div style="display: flex; flex-direction: column; gap: 2px;" title="${tooltip}">
+                    <div style="display: flex; align-items: center; gap: 5px;">
+                      <span class="mono tabular" style="font-weight: 700; color: ${pStyle.color}; font-size: 11.5px;">$${acc.last_payout.amount}</span>
+                      <span style="background: ${pStyle.bg}; border: 1px solid ${pStyle.border}; color: ${pStyle.color}; padding: 1px 5px; font-size: 9px; font-weight: 700; border-radius: 4px; text-transform: uppercase;">
+                        ${pStyle.label}
+                      </span>
+                    </div>
+                    <span class="mono" style="font-size: 9.5px; color: var(--text-tertiary);">
+                      ${pId} • ${pTime.split(' ')[1] || pTime}
+                    </span>
+                  </div>
+                `;
+              })()}
             </td>
             <td><span class="mono tabular">${acc.daily_done} / ${acc.daily_cap}</span></td>
             <td><span class="mono tabular">${acc.hourly_done} / ${acc.hourly_cap}</span></td>
@@ -2424,7 +2836,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <td>
               <div style="display: flex; gap: 4px;">
                 <button class="btn-action" style="padding: 2px 6px; font-size: 10px;" onclick="openWalletModal('${acc.email}', '${acc.faucetpay_usdt_trc20 || ''}')" title="Config Wallet">⚙️</button>
-                <button class="btn-action ${isReady && acc.faucetpay_usdt_trc20 ? 'gold-tier' : ''}" style="padding: 2px 6px; font-size: 10px; ${isReady && acc.faucetpay_usdt_trc20 ? 'background: var(--gold-gradient); color: #000; font-weight: 700;' : ''}" onclick="triggerWithdraw('${acc.email}')" ${!acc.faucetpay_usdt_trc20 || !isReady ? 'disabled' : ''} title="Withdraw Payout">💸</button>
+                <button class="btn-action ${isReady && acc.faucetpay_usdt_trc20 && !isUnderReview ? 'gold-tier' : ''}" style="padding: 2px 6px; font-size: 10px; ${isReady && acc.faucetpay_usdt_trc20 && !isUnderReview ? 'background: var(--gold-gradient); color: #000; font-weight: 700;' : ''} ${isUnderReview ? 'opacity: 0.6; cursor: not-allowed;' : ''}" onclick="triggerWithdraw('${acc.email}')" ${!acc.faucetpay_usdt_trc20 || !isReady || isUnderReview ? `disabled title="${isUnderReview ? 'Payout is currently under review by LuckyWatch. Auto-withdraw paused.' : 'Wallet not set or balance below threshold'}"` : 'title=\"Withdraw Payout\"'}>${isUnderReview ? '⏳' : '💸'}</button>
                 <button class="btn-action" style="padding: 2px 6px; font-size: 10px;" onclick="focusAccountLogs('${acc.email_redacted}')">Stream</button>
               </div>
             </td>
@@ -2467,6 +2879,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       renderLogs();
     }
 
+    /* BOUNDED FIFO LOG RENDERING (MAX 200 NODES TO PREVENT RAM LEAK) */
     function renderLogs() {
       if (!globalState) return;
       const windowEl = document.getElementById('terminal-stream-window');
@@ -2490,6 +2903,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         if (logLevelFilter === 'ERROR') return line.includes('ERROR') || line.includes('failed');
         return true;
       });
+
+      // Bounded sliding window FIFO buffer: cap to MAX_DOM_LOG_NODES (200)
+      if (filteredLines.length > MAX_DOM_LOG_NODES) {
+        filteredLines = filteredLines.slice(-MAX_DOM_LOG_NODES);
+      }
 
       windowEl.innerHTML = filteredLines.map(line => {
         let cls = 't-log-info';
@@ -2520,10 +2938,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     function clearTerminal() {
       document.getElementById('terminal-stream-window').innerHTML = `<div style="color: var(--text-tertiary); padding: 12px;">Terminal buffer cleared.</div>`;
+      showToast('Terminal buffer cleared', 'info');
     }
 
     function exportLogs() {
-      if (!globalState || !globalState.logs) return;
+      if (!globalState || !globalState.logs) {
+        showToast('No logs available to export', 'warning');
+        return;
+      }
       const logContent = globalState.logs.join(String.fromCharCode(10));
       const blob = new Blob([logContent], { type: 'text/plain;charset=utf-8' });
       const url = URL.createObjectURL(blob);
@@ -2532,7 +2954,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       a.download = `luckywatch-fleet-${new Date().toISOString().replace(/:/g, '-')}.log`;
       a.click();
       URL.revokeObjectURL(url);
-      showToast('Logs exported successfully');
+      showToast('Logs exported successfully', 'success');
     }
 
     /* ACTIONS & TOASTS */
@@ -2546,17 +2968,23 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           }
         });
         const result = await res.json();
-        showToast(result.message || `Action ${actionName} executed`);
+        if (res.ok && result.status === 'ok') {
+          showToast(result.message || `Action ${actionName} executed successfully`, 'success');
+        } else if (result.status === 'notice') {
+          showToast(result.message || `Action ${actionName} notice`, 'warning');
+        } else {
+          showToast(result.message || `Action ${actionName} failed`, 'error');
+        }
         fetchStats();
       } catch (err) {
-        showToast(`Action failed: ${err.message}`);
+        showToast(`Action failed: ${err.message}`, 'error');
       }
     }
 
     function copyToClipboard(text) {
       if (!text) return;
       navigator.clipboard.writeText(text).then(() => {
-        showToast(`Copied to clipboard: ${text}`);
+        showToast(`Copied to clipboard: ${text}`, 'success');
       }).catch(() => {
         // Fallback
         const el = document.createElement('textarea');
@@ -2565,12 +2993,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         el.select();
         document.execCommand('copy');
         document.body.removeChild(el);
-        showToast(`Copied: ${text}`);
+        showToast(`Copied to clipboard: ${text}`, 'success');
       });
     }
 
     async function sendEmailVerify(email) {
-      showToast(`Sending verification link for ${email}...`);
+      showToast(`Sending verification link for ${email}...`, 'info');
       try {
         const res = await fetch('/api/actions/send_verify_email', {
           method: 'POST',
@@ -2581,9 +3009,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           body: JSON.stringify({ email: email })
         });
         const result = await res.json();
-        showToast(result.message || 'Verification email sent! Check inbox/spam.');
+        if (res.ok && result.status === 'ok') {
+          showToast(result.message || 'Verification email sent! Check inbox/spam.', 'success');
+        } else {
+          showToast(result.message || 'Verification request notice.', 'warning');
+        }
       } catch (err) {
-        showToast(`Error sending verification email: ${err.message}`);
+        showToast(`Error sending verification email: ${err.message}`, 'error');
       }
     }
 
@@ -2593,7 +3025,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const newEnabled = !currentEnabled;
       const threshold = selectedThreshold >= 0.10 ? selectedThreshold : 0.10;
       
-      showToast(`Setting Auto-Withdraw to ${newEnabled ? 'ENABLED' : 'DISABLED'} (Threshold: $${threshold.toFixed(2)})...`);
+      showToast(`Setting Auto-Withdraw to ${newEnabled ? 'ENABLED' : 'DISABLED'} (Threshold: $${threshold.toFixed(2)})...`, 'info');
       try {
         const res = await fetch('/api/actions/config_auto_withdraw', {
           method: 'POST',
@@ -2604,12 +3036,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           body: JSON.stringify({ enabled: newEnabled, threshold_usd: threshold })
         });
         const result = await res.json();
-        showToast(result.message || 'Auto-Withdraw updated!');
+        if (res.ok && result.status === 'ok') {
+          showToast(result.message || 'Auto-Withdraw updated!', 'success');
+        } else {
+          showToast(result.message || 'Auto-Withdraw update failed', 'error');
+        }
         fetchStats();
       } catch (err) {
-        showToast(`Failed: ${err.message}`);
+        showToast(`Failed to toggle auto-withdraw: ${err.message}`, 'error');
       }
     }
+
     function openWalletModal(email, currentWallet) {
       currentModalEmail = email;
       document.getElementById('modal-wallet-email').textContent = email;
@@ -2628,10 +3065,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     async function requestWalletCode() {
       const wallet = document.getElementById('modal-wallet-address').value.trim();
       if (!wallet) {
-        showToast('Please enter wallet address first');
+        showToast('Please enter wallet address first', 'warning');
         return;
       }
-      showToast(`Requesting confirmation code for ${currentModalEmail}...`);
+      showToast(`Requesting confirmation code for ${currentModalEmail}...`, 'info');
       try {
         const res = await fetch('/api/actions/save_wallet', {
           method: 'POST',
@@ -2642,9 +3079,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           body: JSON.stringify({ email: currentModalEmail, wallet: wallet, code: '' })
         });
         const result = await res.json();
-        showToast('Code sent to Gmail inbox! Please enter code.');
+        if (res.ok && result.status === 'ok') {
+          showToast('Code sent to Gmail inbox! Please enter code.', 'success');
+        } else {
+          showToast(result.message || 'Notice during code request', 'warning');
+        }
       } catch (err) {
-        showToast(`Request code error: ${err.message}`);
+        showToast(`Request code error: ${err.message}`, 'error');
       }
     }
 
@@ -2652,11 +3093,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const wallet = document.getElementById('modal-wallet-address').value.trim();
       const code = document.getElementById('modal-wallet-code').value.trim();
       if (!wallet) {
-        showToast('Please enter a valid wallet address');
+        showToast('Please enter a valid wallet address', 'warning');
         return;
       }
       if (!wallet.startsWith('T') || wallet.length < 30) {
-        showToast('Warning: TRON USDT TRC20 address should start with T...');
+        showToast('Warning: TRON USDT TRC20 address should start with T...', 'warning');
       }
       try {
         const res = await fetch('/api/actions/save_wallet', {
@@ -2668,13 +3109,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           body: JSON.stringify({ email: currentModalEmail, wallet: wallet, code: code })
         });
         const result = await res.json();
-        showToast(result.message || 'Wallet saved successfully');
-        if (result.status === 'ok') {
+        if (res.ok && result.status === 'ok') {
+          showToast(result.message || 'Wallet saved successfully', 'success');
           closeWalletModal();
           fetchStats();
+        } else {
+          showToast(result.message || 'Failed to save wallet', 'error');
         }
       } catch (err) {
-        showToast(`Save wallet failed: ${err.message}`);
+        showToast(`Save wallet failed: ${err.message}`, 'error');
       }
     }
 
@@ -2683,11 +3126,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       if (!acc) return;
       if (!acc.faucetpay_usdt_trc20) {
         openWalletModal(email, '');
-        showToast('Please configure FaucetPay USDT TRC20 address first');
+        showToast('Please configure FaucetPay USDT TRC20 address first', 'warning');
         return;
       }
       
-      showToast(`Initiating payout request for ${acc.email_redacted}...`);
+      showToast(`Initiating payout request for ${acc.email_redacted}...`, 'info');
 
       try {
         const res = await fetch('/api/actions/withdraw', {
@@ -2699,21 +3142,27 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           body: JSON.stringify({ email: email })
         });
         const result = await res.json();
-        showToast(result.message || 'Withdrawal request sent');
+        if (res.ok && result.status === 'ok') {
+          showToast(result.message || 'Withdrawal request processed successfully', 'success');
+        } else if (result.status === 'notice') {
+          showToast(result.message || 'Withdrawal notice', 'warning');
+        } else {
+          showToast(result.message || 'Withdrawal failed', 'error');
+        }
         fetchStats();
       } catch (err) {
-        showToast(`Withdrawal error: ${err.message}`);
+        showToast(`Withdrawal error: ${err.message}`, 'error');
       }
     }
 
     async function triggerWithdrawAll() {
       const readyAccounts = (globalState?.accounts || []).filter(a => parseFloat(a.balance) >= selectedThreshold && a.faucetpay_usdt_trc20);
       if (readyAccounts.length === 0) {
-        showToast('No accounts currently meet the threshold with configured wallet');
+        showToast('No accounts currently meet the threshold with configured wallet', 'warning');
         return;
       }
       
-      showToast(`Sending batch withdrawal request for ${readyAccounts.length} account(s)...`);
+      showToast(`Sending batch withdrawal request for ${readyAccounts.length} account(s)...`, 'info');
 
       try {
         const res = await fetch('/api/actions/withdraw_all', {
@@ -2725,28 +3174,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           body: JSON.stringify({ threshold: selectedThreshold })
         });
         const result = await res.json();
-        showToast(result.message || 'Batch withdrawal request processed');
+        if (res.ok && result.status === 'ok') {
+          showToast(result.message || 'Batch withdrawal request processed', 'success');
+        } else if (result.status === 'notice') {
+          showToast(result.message || 'Batch withdrawal notice', 'warning');
+        } else {
+          showToast(result.message || 'Batch withdrawal failed', 'error');
+        }
         fetchStats();
       } catch (err) {
-        showToast(`Batch withdrawal error: ${err.message}`);
+        showToast(`Batch withdrawal error: ${err.message}`, 'error');
       }
-    }
-
-    function showToast(msg) {
-      const container = document.getElementById('toast-container');
-      const toast = document.createElement('div');
-      toast.className = 'toast-msg';
-      toast.innerHTML = `
-        <svg style="width:14px; height:14px; stroke:var(--emerald-bright); fill:none;" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
-        <span>${escapeHtml(msg)}</span>
-      `;
-      container.appendChild(toast);
-      setTimeout(() => {
-        toast.style.opacity = '0';
-        toast.style.transform = 'translateY(10px)';
-        toast.style.transition = 'all 0.3s';
-        setTimeout(() => toast.remove(), 300);
-      }, 3000);
     }
 
     function escapeHtml(s) {
@@ -2768,20 +3206,24 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.dumps(data).encode("utf-8")
             self.send_response(status_code)
             self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
             self.send_header("Content-Length", str(len(payload)))
             self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Dashboard-Key, Authorization")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.end_headers()
             self.wfile.write(payload)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Error sending JSON response: {e}")
 
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Dashboard-Key, Authorization")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
         self.end_headers()
 
     def _check_auth(self) -> bool:
@@ -2816,14 +3258,28 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/" or path == "/index.html":
             api_key = get_dashboard_api_key()
-            html_injected = DASHBOARD_HTML.replace("__DASHBOARD_API_KEY__", api_key)
+            if not DASHBOARD_TEMPLATE_FILE.exists():
+                try:
+                    DASHBOARD_TEMPLATE_FILE.write_text(DASHBOARD_HTML, encoding="utf-8")
+                except Exception:
+                    pass
+            try:
+                template_content = DASHBOARD_TEMPLATE_FILE.read_text(encoding="utf-8")
+            except Exception:
+                template_content = DASHBOARD_HTML
+            html_injected = template_content.replace("__DASHBOARD_API_KEY__", api_key)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
             self.end_headers()
             self.wfile.write(html_injected.encode("utf-8"))
         elif path == "/api/stats":
             stats = get_latest_stats()
             self._send_json(200, stats)
+        elif path == "/api/health":
+            self._send_json(200, {"status": "ok", "service": "luckywatch-telemetry-server", "timestamp": time.time()})
         else:
             self._send_json(404, {"error": "Not Found", "path": path})
 

@@ -15,9 +15,11 @@ Enterprise-grade Pure Python HTTP Automation for LuckyWatch.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
+import random
 import sys
 import threading
 import time
@@ -72,12 +74,31 @@ class AccountWorker(threading.Thread):
         self.proxy_url = self.account.get("proxy") or self.global_config.get("proxy", {}).get("url")
         self.base_url = self.global_config.get("app", {}).get("base_url", "https://luckywatch.pro").rstrip("/")
         self.api_url = f"{self.base_url}/api"
-        self.user_agent = "Mozilla/5.0"
+        self.user_agent = "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.179 Mobile Safari/537.36"
         self.cookie_string = ""
         self._opener = self._build_opener()
         self._last_auto_withdraw_time = 0
         self._last_known_balance = "0.0000000"
         self._last_known_clovers = 0
+        self._payout_under_review: bool = False
+        self._payout_backoff_until: float = 0.0
+        self._payout_last_status: str = "IDLE"
+
+    def _get_default_headers(self, referer_path: str = "/watch") -> Dict[str, str]:
+        """Return standardized modern Android Chrome headers & Client Hints aligned with device telemetry."""
+        return {
+            "User-Agent": self.user_agent,
+            "Origin": self.base_url,
+            "Referer": f"{self.base_url}{referer_path}",
+            "Sec-CH-UA": '"Not-A.Brand";v="99", "Chromium";v="124", "Google Chrome";v="124"',
+            "Sec-CH-UA-Mobile": "?1",
+            "Sec-CH-UA-Platform": '"Android"',
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Dest": "empty",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Accept-Language": "en-US,en;q=0.9,id;q=0.8",
+        }
 
     def update_fleet_state(self, status: str, countdown_sleep: int = 0, current_task: Optional[Dict[str, Any]] = None, error_reason: Optional[str] = None, daily_done: Optional[int] = None, hourly_done: Optional[int] = None):
         """Atomically persist worker live state directly to state/fleet_state.json for O(1) instant dashboard sync."""
@@ -116,6 +137,9 @@ class AccountWorker(threading.Thread):
 
                 acc_entry["balance"] = getattr(self, "_last_known_balance", "0.0000000")
                 acc_entry["clovers"] = getattr(self, "_last_known_clovers", 0)
+                acc_entry["payout_status"] = getattr(self, "_payout_last_status", "IDLE")
+                acc_entry["payout_under_review"] = bool(getattr(self, "_payout_under_review", False))
+                acc_entry["payout_backoff_until"] = float(getattr(self, "_payout_backoff_until", 0.0))
                 acc_entry["updated_at"] = time.strftime("%H:%M:%S")
                 acc_entry["timestamp"] = int(time.time())
 
@@ -158,11 +182,7 @@ class AccountWorker(threading.Thread):
     def _api(self, endpoint: str, data: Optional[Dict[str, Any]] = None, timeout: int = 15) -> Dict[str, Any]:
         """Execute HTTP POST request to LuckyWatch API."""
         url = f"{self.api_url}/{endpoint.lstrip('/')}"
-        req_headers = {
-            "User-Agent": self.user_agent,
-            "Origin": self.base_url,
-            "Referer": f"{self.base_url}/watch",
-        }
+        req_headers = self._get_default_headers(referer_path="/watch")
         if self.cookie_string:
             req_headers["Cookie"] = self.cookie_string
 
@@ -384,15 +404,12 @@ class AccountWorker(threading.Thread):
                     "captchaResponse": token,
                 }
                 encoded_data = urllib.parse.urlencode(payload).encode("utf-8")
+                auth_headers = self._get_default_headers(referer_path="/signin")
+                auth_headers["Content-Type"] = "application/x-www-form-urlencoded"
                 req = urllib.request.Request(
                     f"{self.api_url}/user/auth/",
                     data=encoded_data,
-                    headers={
-                        "User-Agent": self.user_agent,
-                        "Origin": self.base_url,
-                        "Referer": f"{self.base_url}/signin",
-                        "Content-Type": "application/x-www-form-urlencoded",
-                    },
+                    headers=auth_headers,
                     method="POST",
                 )
                 
@@ -576,24 +593,81 @@ class AccountWorker(threading.Thread):
         return self._api("user/captcha/check/", data={"refreshTask": str(refresh)})
 
     def submit_captcha_coordinates(self, clicks: List[Dict[str, int]]) -> Dict[str, Any]:
-        """Submit 3 click coordinates to claim locked captcha reward."""
+        """Submit 3 click coordinates to claim locked captcha reward with subtle human click jitter."""
         if len(clicks) < 3:
             return {"status": "error", "message": "Less than 3 clicks"}
 
+        # Add subtle human click jitter (+-1 to +-2 px) around solved centroids while staying strictly within target bounds (0 to 300)
+        def apply_jitter(val: int, min_val: int = 5, max_val: int = 295) -> int:
+            jitter = random.choice([-2, -1, 0, 1, 2])
+            return max(min_val, min(max_val, val + jitter))
+
         payload = {
-            "coor[0][x]": str(clicks[0]["x"]),
-            "coor[0][y]": str(clicks[0]["y"]),
-            "coor[1][x]": str(clicks[1]["x"]),
-            "coor[1][y]": str(clicks[1]["y"]),
-            "coor[2][x]": str(clicks[2]["x"]),
-            "coor[2][y]": str(clicks[2]["y"]),
+            "coor[0][x]": str(apply_jitter(clicks[0]["x"])),
+            "coor[0][y]": str(apply_jitter(clicks[0]["y"])),
+            "coor[1][x]": str(apply_jitter(clicks[1]["x"])),
+            "coor[1][y]": str(apply_jitter(clicks[1]["y"])),
+            "coor[2][x]": str(apply_jitter(clicks[2]["x"])),
+            "coor[2][y]": str(apply_jitter(clicks[2]["y"])),
         }
         return self._api("user/captcha/check/", data=payload)
+
+    def sync_payout_history(self) -> Optional[Dict[str, Any]]:
+        """
+        Query upstream payout history via user/payout/ (method=history).
+        If the newest record has status 1 (PAID) or 0 (PAYMENT ERROR), reset _payout_under_review = False.
+        If status 3 (UNDER REVIEW) or 2 (IN PROGRESS), keep _payout_under_review = True.
+        """
+        try:
+            res = self._api("user/payout/", data={"method": "history", "page": "1"}, timeout=10)
+            if res.get("status") == "ok":
+                # LuckyWatch returns {'history': {'data': [...], 'meta': ...}}
+                items = res.get("data", {}).get("history", {}).get("data", [])
+                if not items:
+                    items = res.get("data", {}).get("items", [])
+                if items:
+                    # Sort items by unixtime or id descending to always capture the latest transaction
+                    sorted_items = sorted(
+                        items,
+                        key=lambda x: int(x.get("unixtime", 0) or x.get("id", 0)),
+                        reverse=True
+                    )
+                    first = sorted_items[0]
+                    st_code = str(first.get("status", ""))
+                    status_map = {
+                        "0": "PAYMENT ERROR",
+                        "1": "PAID",
+                        "2": "IN PROGRESS",
+                        "3": "UNDER REVIEW"
+                    }
+                    st_label = status_map.get(st_code, f"CODE_{st_code}")
+                    self._payout_last_status = st_label
+                    if st_code in ("0", "1"):
+                        # Status completed or errored -> unlock review gate
+                        if self._payout_under_review:
+                            logger.info(f"🔓 [PAYOUT HISTORY SYNC] Payout settled ({st_label}) for {self.email}. Releasing under-review lock.")
+                        self._payout_under_review = False
+                        self._payout_backoff_until = 0.0
+                    elif st_code in ("2", "3"):
+                        self._payout_under_review = True
+                        if self._payout_backoff_until < time.time():
+                            self._payout_backoff_until = time.time() + 21600
+                        logger.debug(f"⏳ [PAYOUT HISTORY SYNC] Payout for {self.email} currently {st_label}.")
+                    return first
+        except Exception as e:
+            logger.debug(f"Payout history sync notice for {self.email}: {e}")
+        return None
 
     def check_and_trigger_auto_withdraw(self, current_balance: float):
         """Automatically trigger payout if auto_withdraw is enabled and threshold is reached."""
         auto_cfg = self.global_config.get("auto_withdraw", {})
         if not auto_cfg.get("enabled", False):
+            return
+
+        # Pre-flight gate: if under review and within backoff window, suppress request completely (zero network POST)
+        if self._payout_under_review and time.time() < self._payout_backoff_until:
+            rem_mins = int((self._payout_backoff_until - time.time()) / 60)
+            logger.debug(f"⏳ [AUTO-WITHDRAW SUPPRESSED] Account {self.email} is UNDER_REVIEW. Backoff active for next {rem_mins}m.")
             return
 
         threshold = float(auto_cfg.get("threshold_usd", 0.10))
@@ -618,26 +692,39 @@ class AccountWorker(threading.Thread):
                 "captcha": "",
             }, timeout=15)
             if res.get("status") == "ok":
-                logger.info(f"🎉 [AUTO-WITHDRAW SUCCESS] Payout submitted for {self.email}! Response: {res.get('data')}")
+                self._payout_under_review = True
+                self._payout_backoff_until = time.time() + 21600  # 6 hours backoff
+                self._payout_last_status = "UNDER_REVIEW"
+                self.update_fleet_state(status="ACTIVE")
+                logger.info(f"🎉 [AUTO-WITHDRAW SUCCESS] Payout submitted for {self.email}! State set to UNDER_REVIEW (6h backoff). Response: {res.get('data')}")
             else:
                 msg = res.get("message", "unknown error")
-                logger.warning(f"⚠️ [AUTO-WITHDRAW NOTICE] Server response: {msg}")
+                if "transactionsBeingChecked" in msg:
+                    self._payout_under_review = True
+                    self._payout_backoff_until = time.time() + 21600  # 6 hours backoff
+                    self._payout_last_status = "UNDER_REVIEW"
+                    self.update_fleet_state(status="ACTIVE")
+                    logger.info(f"⏳ [AUTO-WITHDRAW NOTICE] Payout under review by LuckyWatch (transactionsBeingChecked) for {self.email}. State set to UNDER_REVIEW (6h backoff).")
+                else:
+                    logger.warning(f"⚠️ [AUTO-WITHDRAW NOTICE] Server response: {msg}")
         except Exception as e:
             logger.error(f"❌ [AUTO-WITHDRAW ERROR] Failed to send payout request: {e}")
 
     def claim_daily_bonus(self) -> Dict[str, Any]:
         """
-        Smart Daily Activity Bonus Claimer.
+        Smart Daily Activity Bonus Claimer with End-of-Day (EOD) Milestone Fallback.
         Tier Rules:
-          - 100 views -> 100 clovers
-          - 200 views -> 500 clovers
-          - 300 views -> 1000 clovers
-          - 400 views -> $0.005 USD
-          - 500 views -> $0.010 USD (MAX PRIZE)
+          - 100 views -> 100 clovers (tier 100)
+          - 200 views -> 500 clovers (tier 200)
+          - 300 views -> 1000 clovers (tier 300)
+          - 400 views -> $0.005 USD (tier 400)
+          - 500 views -> $0.010 USD (tier 500 - MAX PRIZE)
         Policy:
           - Daily bonus can ONLY be claimed ONCE per UTC day.
-          - We STRICTLY wait until viewCurDay >= 500 to secure the top $0.01 USD reward.
-          - Never prematurely claim low tiers unless configured otherwise.
+          - Normal operation: wait until viewCurDay >= 500 to secure the top $0.01 USD reward.
+          - Smart EOD Fallback: if secondsUntilEndOfDay <= 1800 (within 30 mins of UTC midnight)
+            and viewCurDay < 500 and dailyBonusCnt == 0, claim the highest achieved milestone tier
+            (>=100 views) so accumulated bonus clovers/USD do not expire into $0.
         """
         try:
             info = self._api("user/tasks/dailyBonus/", data={"method": "getInfo"})
@@ -663,29 +750,71 @@ class AccountWorker(threading.Thread):
                 else:
                     logger.warning(f"⚠️ [{self.email}] Daily bonus claim response: {res.get('message')}")
                 return res
-            else:
-                needed = 500 - view_cur_day
-                logger.info(f"⏳ [{self.email}] Daily Bonus Progress: {view_cur_day}/500 views ({needed} more needed for max $0.01 reward). Claim postponed.")
-                return {"status": "in_progress", "viewCurDay": view_cur_day, "needed": needed}
+
+            # Smart End-of-Day Fallback: within 30 mins before UTC midnight (1800s)
+            if sec_left <= 1800:
+                if view_cur_day >= 100:
+                    achieved_tier = 400 if view_cur_day >= 400 else (300 if view_cur_day >= 300 else (200 if view_cur_day >= 200 else 100))
+                    logger.info(f"⏳🌙 [{self.email}] End-of-Day window active ({sec_left}s left, <30m). Claiming highest achieved milestone tier {achieved_tier} ({view_cur_day} views) before UTC midnight reset...")
+                    res = self._api("user/tasks/dailyBonus/", data={"method": "getBonus"})
+                    if res.get("status") == "ok":
+                        logger.info(f"🎉 [{self.email}] EOD DAILY BONUS CLAIMED SUCCESSFULLY (Tier {achieved_tier})! Result: {res.get('data')}")
+                    else:
+                        logger.warning(f"⚠️ [{self.email}] EOD daily bonus claim response: {res.get('message')}")
+                    return res
+                else:
+                    logger.info(f"⏳🌙 [{self.email}] EOD window active ({sec_left}s left) but views ({view_cur_day}) < 100 min threshold. No bonus to claim.")
+                    return {"status": "below_min_threshold", "viewCurDay": view_cur_day, "secondsUntilEndOfDay": sec_left}
+
+            needed = 500 - view_cur_day
+            logger.info(f"⏳ [{self.email}] Daily Bonus Progress: {view_cur_day}/500 views ({needed} more needed for max $0.01 reward). Claim postponed.")
+            return {"status": "in_progress", "viewCurDay": view_cur_day, "needed": needed}
         except Exception as e:
             logger.error(f"Error checking daily bonus for {self.email}: {e}")
             return {"status": "error", "message": str(e)}
 
     def seconds_until_next_hour(self) -> int:
-        """Calculate exact seconds until the next hour rollover (:00:15) UTC/local."""
+        """Calculate exact seconds until the next hour rollover with per-account staggered wake-up jitter."""
         now = datetime.now()
-        # Next hour at 00 minutes and 15 seconds
+        # Next hour base at 00 minutes and 15 seconds
         next_hour = (now + timedelta(hours=1)).replace(minute=0, second=15, microsecond=0)
-        secs = int((next_hour - now).total_seconds())
-        # Return exact dynamic remaining seconds
-        return max(5, secs)
+        base_secs = int((next_hour - now).total_seconds())
+
+        # Determine account index among configured accounts for deterministic spacing
+        accounts = self.global_config.get("accounts", [])
+        account_index = 0
+        for idx, acc in enumerate(accounts):
+            if acc.get("email") == self.email:
+                account_index = idx
+                break
+
+        # Calculate dynamic staggered offset:
+        # Index-based offset (8 seconds per worker) + email hash salt + uniform jitter (0 to 4s)
+        # This prevents 15 workers from hitting Captcha Solver :5073 and Turnstile :5072 at the same instant.
+        email_hash_val = int(hashlib.md5(self.email.encode("utf-8")).hexdigest()[:4], 16) % 5
+        stagger_offset = (account_index * 8) + email_hash_val + random.uniform(0.0, 4.0)
+
+        total_secs = max(5, int(base_secs + stagger_offset))
+        return total_secs
 
     def seconds_until_next_day(self) -> int:
-        """Calculate exact seconds until tomorrow reset 00:00:30 UTC."""
+        """Calculate exact seconds until tomorrow reset 00:00:30 UTC with per-account staggered jitter."""
         now_utc = datetime.now(timezone.utc)
         next_day_utc = (now_utc + timedelta(days=1)).replace(hour=0, minute=0, second=30, microsecond=0)
-        secs = int((next_day_utc - now_utc).total_seconds())
-        return max(30, secs)
+        base_secs = int((next_day_utc - now_utc).total_seconds())
+
+        accounts = self.global_config.get("accounts", [])
+        account_index = 0
+        for idx, acc in enumerate(accounts):
+            if acc.get("email") == self.email:
+                account_index = idx
+                break
+
+        email_hash_val = int(hashlib.md5(self.email.encode("utf-8")).hexdigest()[:4], 16) % 5
+        stagger_offset = (account_index * 8) + email_hash_val + random.uniform(0.0, 4.0)
+
+        total_secs = max(30, int(base_secs + stagger_offset))
+        return total_secs
 
     def adaptive_sleep(self, total_seconds: int, reason: str = "limit"):
         """Sleep with 1-second step checks to allow fast shutdown and accurate countdown."""
@@ -742,6 +871,12 @@ class AccountWorker(threading.Thread):
                 except Exception as e:
                     logger.warning(f"Daily bonus check notice: {e}")
 
+            # Check upstream payout history status to sync UNDER_REVIEW -> SETTLED/ERROR
+            try:
+                self.sync_payout_history()
+            except Exception as e:
+                logger.debug(f"Payout history sync error: {e}")
+
             # Always fetch real user balance from server and check auto-withdraw
             try:
                 u_curr = self.get_user_info().get("data", {})
@@ -760,6 +895,13 @@ class AccountWorker(threading.Thread):
 
                 if res.get("status") == "success":
                     total_session_earned += 1
+                    # Periodically sync payout history (every 10 videos)
+                    if total_session_earned % 10 == 0:
+                        try:
+                            self.sync_payout_history()
+                        except Exception:
+                            pass
+
                     try:
                         u = self.get_user_info().get("data", {})
                         bal_val = float(u.get('balance', 0.0) or 0.0)
@@ -767,7 +909,8 @@ class AccountWorker(threading.Thread):
                         self.check_and_trigger_auto_withdraw(bal_val)
                     except Exception:
                         pass
-                    time.sleep(delay)
+                    loop_delay = delay + random.uniform(0.3, 1.2)
+                    time.sleep(loop_delay)
                 elif res.get("status") == "limit_hour":
                     sleep_hr = self.seconds_until_next_hour()
                     mins_rem = round(sleep_hr / 60, 1)
@@ -792,7 +935,8 @@ class AccountWorker(threading.Thread):
                     self.update_fleet_state(status="ACTIVE", countdown_sleep=15)
                     self.adaptive_sleep(15, reason="queue_empty")
                 else:
-                    time.sleep(delay)
+                    loop_delay = delay + random.uniform(0.3, 1.2)
+                    time.sleep(loop_delay)
 
             if not self.daemon_mode:
                 logger.info(f"Non-daemon cycle completed for {self.email}. Session earned: {total_session_earned} videos.")
@@ -848,9 +992,10 @@ class AccountWorker(threading.Thread):
         # 2. Trigger task start telemetry
         self.start_task(task_id)
 
-        # 3. Simulate real video stream playback duration
-        logger.info(f"⏳ Streaming video for {duration}s ...")
-        time.sleep(duration + 1)
+        # 3. Simulate real video stream playback duration with natural jitter
+        playback_sleep = duration + random.uniform(0.5, 1.8)
+        logger.info(f"⏳ Streaming video for {duration}s (playback wait: {playback_sleep:.2f}s) ...")
+        time.sleep(playback_sleep)
 
         # 4. Query Captcha Check
         claim_res = self.check_captcha(refresh=0)
